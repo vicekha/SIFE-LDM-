@@ -1,0 +1,27 @@
+# Core Dependencies
+jax>=0.4.0
+jaxlib>=0.4.0
+flax>=0.7.0
+optax>=0.1.0
+numpy>=1.21.0
+
+# TPU Support (install separately)
+# pip install jax[tpu] -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+
+# Data Processing
+tokenizers>=0.13.0
+datasets>=2.0.0
+
+# Utilities
+tqdm>=4.64.0
+wandb>=0.13.0
+tensorboard>=2.10.0
+
+# Optional: For code tokenization
+tree_sitter>=0.20.0
+
+# Development
+pytest>=7.0.0
+black>=22.0.0
+flake8>=5.0.0
+mypy>=0.990
