@@ -637,14 +637,23 @@ batch_compute_hamiltonian = vmap(compute_hamiltonian, in_axes=(0, None))
 
 def compute_landscape_curvature(
     A: Array,
-    config: SIFEConfig
+    config: SIFEConfig,
+    dynamic_v: Optional[Array] = None
 ) -> Array:
     """
     Compute the curvature (second derivative) of the local potential landscape.
     Used for stability regularization to ensure deep attractors.
     """
     # Second derivative of V_dw w.r.t A: -beta + 3*alpha*A^2
-    curvature_A = -config.beta + 3 * config.alpha * A**2
+    beta = config.beta
+    if dynamic_v is not None:
+        # Tighter beta for higher dynamic propagation velocity v
+        # Reshape dynamic_v from (B, 1) -> (B, 1, ..., 1) to broadcast against A's shape
+        extra_dims = A.ndim - dynamic_v.ndim
+        dv = dynamic_v.reshape(dynamic_v.shape + (1,) * extra_dims)
+        beta = beta * dv
+        
+    curvature_A = -beta + 3 * config.alpha * A**2
     return curvature_A
 
 

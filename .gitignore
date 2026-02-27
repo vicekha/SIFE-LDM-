@@ -18,5 +18,10 @@ venv.bak/
 # Project specifics
 data/
 checkpoints/
+generated_images/
+gpu_config.json
 *.log
 *output.txt
+error*.log
+trace.txt
+get_trace.py

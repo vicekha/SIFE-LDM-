@@ -95,6 +95,9 @@ class SIFELDMConfig(NamedTuple):
     # Image configuration
     is_image: bool = False
     image_size: Tuple[int, int] = (32, 32)
+    
+    # Conditional generation configuration
+    num_classes: int = 0  # 0 = unconditional; > 0 enables CFG class conditioning
 
 
 class ImageEncoder(nn.Module):
@@ -124,6 +127,64 @@ class ImageDecoder(nn.Module):
         # Project back to 3 channels
         h = nn.Dense(3)(jnp.abs(x)) 
         return jnp.clip(h, 0.0, 1.0)
+
+
+class LabelEncoder(nn.Module):
+    """
+    Encodes integer class labels into complex-valued context embeddings
+    for class-conditional generation via Phase-Coherent CFG.
+    
+    Amplitude encodes class salience; phase encodes category geometry.
+    """
+    num_classes: int
+    features: int
+    
+    @nn.compact
+    def __call__(self, labels: Array) -> Array:
+        """labels: (B,) int32 → (B, features) complex64"""
+        # Separate real/imag embeddings to form a complex class vector
+        real_emb = nn.Embed(self.num_classes, self.features)(labels)  # (B, features)
+        imag_emb = nn.Embed(self.num_classes, self.features)(labels)  # (B, features)
+        # Scale imaginary part to be phase-like (small, [-pi, pi])
+        imag_emb = jnp.pi * jnp.tanh(imag_emb)
+        return real_emb.astype(jnp.complex64) + 1j * imag_emb.astype(jnp.complex64)
+
+
+def predict_meta_physics(
+    context: Optional[Array], 
+    batch_size: int,
+    base_v: float = 1.0,
+    base_lambda_res: float = 0.5,
+    base_omega_0: float = 1.0
+) -> Dict[str, Array]:
+    """
+    Predicts optimal SIFE Hamiltonian physical parameters dynamically based on context.
+    Outputs overrides for (v, lambda_res, omega_0) scaled around their base config values.
+    """
+    if context is None:
+        # If no context, just return static base parameters
+        return {
+            'v': jnp.full((batch_size, 1), base_v),
+            'lambda_res': jnp.full((batch_size, 1), base_lambda_res),
+            'omega_0': jnp.full((batch_size, 1), base_omega_0),
+        }
+    
+    # Pool context (assume shape B, seq_len, context_dim)
+    ctx_pooled = jnp.mean(jnp.abs(context), axis=1) # Convert complex context to real pool
+    
+    # Deterministic modifiers based on context variance (parameter-free)
+    # High variance equals high structural complexity -> requires dynamic physical shifting
+    ctx_var = jnp.var(ctx_pooled, axis=-1, keepdims=True) # (B, 1)
+    
+    v_mod = jnp.clip(ctx_var, 0.0, 1.0)
+    lambda_mod = jnp.clip(1.0 - ctx_var, -0.5, 0.5)
+    omega_mod = jnp.clip(ctx_var, 0.0, 1.0)
+    
+    return {
+        'v': base_v * (0.5 + v_mod),
+        'lambda_res': base_lambda_res + lambda_mod * 0.5,
+        'omega_0': base_omega_0 * (0.5 + omega_mod)
+    }
 
 
 class SIFELDM(nn.Module):
@@ -255,17 +316,33 @@ class SIFELDM(nn.Module):
             phase_diff_w = theta[:, :, 1:, :] - theta[:, :, :-1, :]
             coupling_loss = 0.5 * (jnp.mean(1 - jnp.cos(phase_diff_h)) + jnp.mean(1 - jnp.cos(phase_diff_w)))
             
-        total_loss = mse_loss + self.config.phase_coupling_lambda * coupling_loss
+        # Predict Dynamic Meta-Physics from Context
+        physics_params = predict_meta_physics(
+            context=batch.get('context'), 
+            batch_size=batch_size,
+            base_v=1.0,
+            base_lambda_res=self.config.sife.lambda_res,
+            base_omega_0=self.config.sife.omega_0
+        )
+        
+        # Evaluate global Phase Coupling using dynamic lambda_res
+        # Reshape to easily broadcast over sequence
+        dyn_lambda = physics_params['lambda_res'].reshape(batch_size, 1)
+        total_loss = mse_loss + jnp.mean(dyn_lambda * self.config.phase_coupling_lambda * coupling_loss)
         
         # Stability Regularization (Landscape Hessian)
         if self.config.stability_lambda > 0:
             from .field import compute_landscape_curvature
-            # Estimate x_0 from epsilon_pred
-            # Use safe amplitude
+            
+            # Reconstruct the physics SIFEConfig overrides dynamically
+            # Since SIFEConfig is a namedtuple/dataclass, we pass the raw arrays to a modified curvature function
+            # Or use dynamic arrays directly in compute_landscape_curvature
             amp = jnp.sqrt(jnp.real(epsilon_pred)**2 + jnp.imag(epsilon_pred)**2 + 1e-12)
-            curvature = compute_landscape_curvature(amp, self.config.sife)
+            
+            # The compute_landscape_curvature requires alpha, beta which we keep static.
+            curvature = compute_landscape_curvature(amp, self.config.sife, dynamic_v=physics_params['v'])
+            
             # Penalize shallow minima: high curature needed
-            # Use negative log or similar to push curvature upwards
             stability_loss = jnp.mean(jnp.exp(-curvature))
             total_loss = total_loss + self.config.stability_lambda * stability_loss
         
@@ -296,9 +373,11 @@ def create_model(
     dummy_x = jax.random.normal(key, dummy_shape)
     dummy_x = dummy_x + 1j * jax.random.normal(jax.random.split(key)[0], dummy_shape)
     dummy_t = jnp.zeros((config.batch_size,), dtype=jnp.int32)
+    # Dummy context (B, 1, embed_dim) complex — forces Flax to register cross-attention weights
+    dummy_context = jnp.zeros((config.batch_size, 1, config.embed_dim), dtype=jnp.complex64)
     
-    # Initialize
-    params = model.init(key, dummy_x, dummy_t, deterministic=True)
+    # Initialize with context so ComplexCrossAttention parameters (Wr, Wi, etc.) are created
+    params = model.init(key, dummy_x, dummy_t, context=dummy_context, deterministic=True)
     
     return model, params
 

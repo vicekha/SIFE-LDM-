@@ -260,66 +260,57 @@ class ComplexReLU(nn.Module):
 
 
 
-class ComplexGatingNetwork(nn.Module):
+class PhaseRouter(nn.Module):
     """
-    Computes routing weights for Mixture of Experts from complex input.
+    Phase-Routed Mixture of Experts Gating Network.
+    Routes tokens strictly mathematically based on their Complex Phase Angle (Logos).
     """
     num_experts: int
-    num_experts_per_token: int = 1
     
     @nn.compact
     def __call__(self, x: Array) -> Tuple[Array, Array]:
-        # x is (batch, seq, features)
-        # Use both amplitude and phase for routing
-        amp = jnp.real(jnp.abs(x))
+        # x shape: (batch, seq, features)
+        
+        # Calculate the phase angle (-pi to pi)
         phase = jnp.angle(x)
         
-        # Combine into routing features
-        routing_input = jnp.concatenate([amp, phase], axis=-1)
+        # Calculate circular mean of phase across feature dimension for each token
+        mean_cos = jnp.mean(jnp.cos(phase), axis=-1)
+        mean_sin = jnp.mean(jnp.sin(phase), axis=-1)
+        token_phase = jnp.arctan2(mean_sin, mean_cos)
         
-        # Standard real-valued linear layer for routing scores
-        scores = nn.Dense(self.num_experts)(routing_input)
+        # Map Phase from (-pi, pi) to (0, 1)
+        normalized_phase = (token_phase + jnp.pi) / (2 * jnp.pi)
         
-        # Softmax to get routing probabilities
-        probs = jax.nn.softmax(scores, axis=-1)
+        # Map to expert sectors
+        expert_indices = jnp.floor(normalized_phase * self.num_experts).astype(jnp.int32)
+        expert_indices = jnp.clip(expert_indices, 0, self.num_experts - 1)
         
-        # Select top-k experts
-        if self.num_experts_per_token == 1:
-            expert_indices = jnp.argmax(probs, axis=-1)
-            # Mask out non-selected experts (optional for sparse MoE)
-            return probs, expert_indices
-        else:
-            # Multi-expert routing (Top-K)
-            top_k_probs, top_k_indices = jax.lax.top_k(probs, self.num_experts_per_token)
-            # Re-normalize top-k
-            top_k_probs = top_k_probs / jnp.sum(top_k_probs, axis=-1, keepdims=True)
-            return top_k_probs, top_k_indices
+        # Deterministic routing probability matrix
+        probs = jax.nn.one_hot(expert_indices, self.num_experts)
+        
+        return probs, expert_indices
 
 
 class ComplexMoELayer(nn.Module):
     """
-    Mixture of Experts layer for the SIFE complex field.
+    Phase-Routed Mixture of Experts layer for the SIFE complex field.
     """
     num_experts: int
     features: int
     mlp_ratio: int = 4
-    num_experts_per_token: int = 1
+    num_experts_per_token: int = 1 # Kept for API compatibility
     
     @nn.compact
     def __call__(self, x: Array, deterministic: bool = False) -> Array:
-        # 1. Gate
-        probs, indices = ComplexGatingNetwork(
-            num_experts=self.num_experts,
-            num_experts_per_token=self.num_experts_per_token
+        # 1. Physical Phase-based Gate
+        probs, indices = PhaseRouter(
+            num_experts=self.num_experts
         )(x)
-        
-        # 2. Sequential/Vmap Expert Execution (Simplified for now)
-        # In a real MoE, we'd use sparse operations or vmap over experts
-        # Here we'll implement a functional routing for JAX compatibility
         
         out = jnp.zeros_like(x)
         
-        # For each expert, process the tokens assigned to it
+        # 2. Execute sparse experts
         for i in range(self.num_experts):
             # Create the expert MLP
             expert_mlp = lambda inp: ComplexLinear(self.features)(
@@ -328,16 +319,9 @@ class ComplexMoELayer(nn.Module):
                 )
             )
             
-            # Mask for tokens routed to this expert
-            if self.num_experts_per_token == 1:
-                mask = (indices == i)
-                expert_weight = probs[..., i:i+1] # Probability for this expert
-            else:
-                # Multi-expert masking
-                mask = jnp.any(indices == i, axis=-1)
-                # Find the probability weight for this expert in the top-k set
-                # This is a bit complex for a loop, so we'll simplify:
-                expert_weight = jnp.sum(jnp.where(indices == i, probs, 0.0), axis=-1, keepdims=True)
+            # Hard routing mask
+            mask = (indices == i)
+            expert_weight = probs[..., i:i+1]
             
             # Apply expert only to relevant tokens
             expert_out = expert_mlp(x)
@@ -1336,6 +1320,51 @@ class ComplexPatchEncoder(nn.Module):
         return x
 
 
+class PhasePool(nn.Module):
+    """
+    Phase-Coherence Token Merging (Pooling).
+    Reduces sequence length from N to k by clustering tokens with similar SIFE Phases (Logos).
+    Returns pooled tokens and the soft assignment matrix A used for unpooling.
+    """
+    k: int
+    
+    @nn.compact
+    def __call__(self, x: Array) -> Tuple[Array, Array]:
+        # x is (B, N, d)
+        phase = jnp.angle(x)
+        
+        # Combine into phase features (circular mean)
+        mean_cos = jnp.mean(jnp.cos(phase), axis=-1, keepdims=True)
+        mean_sin = jnp.mean(jnp.sin(phase), axis=-1, keepdims=True)
+        phase_features = jnp.concatenate([mean_cos, mean_sin], axis=-1)
+        
+        # Linear layer to predict assignment logits to k clusters
+        logits = nn.Dense(self.k)(phase_features)
+        A = jax.nn.softmax(logits, axis=-1) # (B, N, k)
+        
+        # Pool to k tokens: A^T @ x -> (B, k, d)
+        x_pooled = jnp.einsum('bnk,bnd->bkd', A, x)
+        
+        # Normalize by cluster size
+        cluster_sizes = jnp.sum(A, axis=1, keepdims=True) # (B, 1, k)
+        cluster_sizes = jnp.clip(cluster_sizes, 1e-5, None)
+        x_pooled = x_pooled / cluster_sizes.transpose(0, 2, 1)
+        
+        return x_pooled, A
+
+
+class PhaseUnpool(nn.Module):
+    """
+    Phase-Coherence Token Unmerging.
+    Upsamples from k tokens back to N using the soft assignment matrix A.
+    """
+    @nn.compact
+    def __call__(self, x_pooled: Array, A: Array) -> Array:
+        # x_pooled is (B, k, d), A is (B, N, k)
+        x_unpooled = jnp.einsum('bnk,bkd->bnd', A, x_pooled)
+        return x_unpooled
+
+
 class UnifiedSIFETransformer(nn.Module):
     """
     A unified complex-valued Diffusion Transformer (DiT) architecture
@@ -1382,8 +1411,21 @@ class UnifiedSIFETransformer(nn.Module):
         if abs_phase is not None:
             h = h * jnp.exp(1j * abs_phase)[:, jnp.newaxis, jnp.newaxis]
             
+        # Intermediate sequence length halving for dense efficiency (Phase-Coherent Token Merging)
+        do_pooling = (self.depth >= 6)
+        mid_depth = self.depth // 2
+        A_matrices = []
+        
         # Transformer Blocks
         for i in range(self.depth):
+            
+            # Pool halfway down
+            if do_pooling and i == self.depth // 4:
+                # Reduce sequence length by 50%
+                k = max(1, h.shape[1] // 2)
+                h, A = PhasePool(k=k)(h)
+                A_matrices.append(A)
+                
             h = ComplexTransformerBlock(
                 features=self.features,
                 context_dim=self.context_dim or self.features,
@@ -1392,6 +1434,11 @@ class UnifiedSIFETransformer(nn.Module):
                 mlp_ratio=self.mlp_ratio,
                 num_experts=self.num_experts
             )(h, context, mask, deterministic)
+            
+            # Unpool halfway up
+            if do_pooling and i == self.depth - (self.depth // 4):
+                A = A_matrices.pop()
+                h = PhaseUnpool()(h, A)
             
         # Final LayerNorm & projection to original features
         h = ComplexLayerNorm()(h)

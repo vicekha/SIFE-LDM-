@@ -463,6 +463,192 @@ class DDIMSampler:
         return x
 
 
+class EulerMaruyamaSampler:
+    """
+    Continuous-Time Stochastic Differential Equation (SDE) Diffusion sampler.
+    Uses Euler-Maruyama to solve the reverse-time SDE for generating the complex field.
+    
+    Reverse SDE: dΨ = [f(Ψ, t) - g(t)^2 ∇_Ψ log p_t(Ψ)] dt + g(t) dW
+    """
+    def __init__(self, diffusion: GaussianDiffusion):
+        self.diffusion = diffusion
+    
+    def step(
+        self,
+        model: Callable,
+        x_t: Array,
+        t: float,
+        dt: float,
+        key: PRNGKey,
+        context: Optional[Array] = None
+    ) -> Array:
+        """
+        Perform one Euler-Maruyama step dt backward in continuous time t.
+        """
+        # Convert continuous t to discrete indices or continuous embedding
+        t_idx = jnp.clip(int(t * self.diffusion.num_timesteps), 0, self.diffusion.num_timesteps - 1)
+        t_array = jnp.array([t_idx], dtype=jnp.int32)
+        
+        # Predict noise using standard parameterized network
+        epsilon = model(x_t, t_array, context)
+        
+        # Compute Score: s_theta = -epsilon / sqrt(1 - alpha_bar)
+        sqrt_1m_alpha = self.diffusion.sqrt_one_minus_alphas_cumprod[t_idx]
+        score = -epsilon / jnp.maximum(sqrt_1m_alpha, 1e-5)
+        
+        # Drift and diffusion terms for variance preserving (VP) SDE
+        # f(x, t) = -1/2 beta(t) x
+        # g(t)^2 = beta(t)
+        beta_t = self.diffusion.betas[t_idx]
+        
+        drift = -0.5 * beta_t * x_t - beta_t * score
+        diffusion_term = jnp.sqrt(beta_t)
+        
+        # dt is negative for reverse time
+        abs_dt = jnp.abs(dt)
+        
+        # Noise
+        noise = jax.random.normal(key, x_t.shape, dtype=jnp.float32)
+        noise = noise + 1j * jax.random.normal(jax.random.split(key)[0], x_t.shape, dtype=jnp.float32)
+        
+        # Euler-Maruyama update: x_{t-dt} = x_t - drift * dt + diffusion * sqrt(dt) * noise
+        # For reverse SDE, we subtract the drift term.
+        x_prev = x_t - drift * abs_dt + diffusion_term * jnp.sqrt(abs_dt) * noise
+        
+        return x_prev
+    
+    def sample(
+        self,
+        model: Callable,
+        shape: Tuple[int, ...],
+        key: PRNGKey,
+        context: Optional[Array] = None,
+        num_steps: int = 100,
+        sife_config=None,
+        stability_threshold: float = 0.5
+    ) -> Tuple[Array, int]:
+        """
+        Generate samples using the reverse-time SDE.
+        
+        If sife_config is provided, uses Attractor-Based Adaptive Inference:
+        the loop exits early when the decoded field reaches a stable low-energy
+        Hamiltonian state (is_field_stable), saving compute on easy prompts.
+        
+        Returns:
+            (sample, steps_taken) — steps_taken < num_steps means early stopped.
+        """
+        # Initialize from noise
+        key, subkey = jax.random.split(key)
+        x = jax.random.normal(subkey, shape, dtype=jnp.float32)
+        x = x + 1j * jax.random.normal(jax.random.split(subkey)[0], shape, dtype=jnp.float32)
+        
+        dt = 1.0 / num_steps
+        time_steps = jnp.linspace(1.0, dt, num_steps)
+        
+        steps_taken = num_steps
+        for i, t in enumerate(time_steps):
+            key, subkey = jax.random.split(key)
+            x = self.step(model, x, float(t), dt, subkey, context)
+            
+            # Attractor-Based Adaptive Inference (System 2 Stopping)
+            # Only check every 10 steps for efficiency
+            if sife_config is not None and i % 10 == 0 and i > 0:
+                from .field import SIFField, is_field_stable
+                # Decode x into a lightweight SIFField for stability check
+                amp = jnp.abs(x)
+                phi = jnp.angle(x)
+                field = SIFField(
+                    amplitude=amp[0],          # Check first sample in batch
+                    phase=phi[0],
+                    fluctuation=phi[0],
+                    velocity_amp=jnp.zeros_like(amp[0]),
+                    velocity_phi=jnp.zeros_like(phi[0])
+                )
+                if is_field_stable(field, sife_config, threshold=stability_threshold):
+                    steps_taken = i + 1
+                    break
+        
+        return x, steps_taken
+    
+    def cfg_guided_sample(
+        self,
+        model: Callable,
+        shape: Tuple[int, ...],
+        key: PRNGKey,
+        context: Optional[Array] = None,
+        guidance_scale: float = 7.5,
+        num_steps: int = 100,
+        sife_config=None,
+        stability_threshold: float = 0.5
+    ) -> Tuple[Array, int]:
+        """
+        Phase-Coherent Classifier-Free Guidance (CFG) sampling.
+        
+        Runs the model twice per step:
+          - Conditional:   ε_cond   = model(x, t, context)
+          - Unconditional: ε_uncond = model(x, t, None)
+        
+        Blended guidance in phase space:
+          ε_guided = ε_uncond + s * (ε_cond - ε_uncond)
+        
+        This steers generation toward the target class without any additional
+        parameters — purely exploiting the existing context slot.
+        """
+        key, subkey = jax.random.split(key)
+        x = jax.random.normal(subkey, shape, dtype=jnp.float32)
+        x = x + 1j * jax.random.normal(jax.random.split(subkey)[0], shape, dtype=jnp.float32)
+        
+        dt = 1.0 / num_steps
+        time_steps = jnp.linspace(1.0, dt, num_steps)
+        
+        steps_taken = num_steps
+        for i, t in enumerate(time_steps):
+            t_idx = jnp.clip(int(float(t) * self.diffusion.num_timesteps),
+                             0, self.diffusion.num_timesteps - 1)
+            t_array = jnp.array([t_idx], dtype=jnp.int32)
+            
+            # Conditional noise prediction
+            eps_cond = model(x, t_array, context)
+            # Unconditional noise prediction (null context)
+            eps_uncond = model(x, t_array, None)
+            
+            # CFG blend: steer epsilon toward the class
+            eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+            
+            # Apply SDE step with the guided score
+            sqrt_1m_alpha = self.diffusion.sqrt_one_minus_alphas_cumprod[t_idx]
+            score = -eps_guided / jnp.maximum(sqrt_1m_alpha, 1e-5)
+            beta_t = self.diffusion.betas[t_idx]
+            drift = -0.5 * beta_t * x - beta_t * score
+            diffusion_term = jnp.sqrt(beta_t)
+            abs_dt = jnp.abs(dt)
+            
+            key, subkey = jax.random.split(key)
+            noise = jax.random.normal(subkey, x.shape, dtype=jnp.float32)
+            noise = noise + 1j * jax.random.normal(jax.random.split(subkey)[0], x.shape, dtype=jnp.float32)
+            x = x - drift * abs_dt + diffusion_term * jnp.sqrt(abs_dt) * noise
+            
+            # Attractor-Based Early Stopping
+            if sife_config is not None and i % 10 == 0 and i > 0:
+                from .field import SIFField, is_field_stable
+                amp = jnp.abs(x)
+                phi = jnp.angle(x)
+                field = SIFField(
+                    amplitude=amp[0],
+                    phase=phi[0],
+                    fluctuation=phi[0],
+                    velocity_amp=jnp.zeros_like(amp[0]),
+                    velocity_phi=jnp.zeros_like(phi[0])
+                )
+                if is_field_stable(field, sife_config, threshold=stability_threshold):
+                    steps_taken = i + 1
+                    break
+        
+        return x, steps_taken
+
+
+
+
 class SIFEDiffusion:
     """
     SIFE-specific diffusion process that incorporates field dynamics.
