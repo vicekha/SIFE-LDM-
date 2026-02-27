@@ -8,11 +8,14 @@ A physics-based generative framework that unifies the representational power of 
 
 ## 🌟 Key Features
 
-- **Physics-Based Architecture**: Intelligence as a complex-valued field with amplitude (salience) and phase (logical relations)
+- **SIFE V2 Architecture**: Intelligence as a complex-valued field with amplitude (salience) and phase (logical relations)
+- **Phase-Routed MoE**: Dynamically routes tokens based on field phase coherence
+- **Learnable Meta-Physics**: `predict_meta_physics()` dynamically scales Hamiltonian parameters
+- **Token Merging (PhasePool)**: 50% FLOPs reduction via phase-aware token merging
 - **Lagrangian-Hamiltonian Dynamics**: Evolves under conserved "cognitive energy" with persistent attractors
-- **Truth Potential**: Rewards phase coherence between neighbouring nodes, enforcing internal consistency
+- **Phase-Coherent CFG**: Conditional generation via guided field steering
 - **Multi-Scale Hierarchy**: Nested rings at different scales for hierarchical cognition
-- **TPU Optimized**: Fully implemented in JAX/Flax for efficient TPU training
+- **GPU/TPU Optimized**: Automatic VRAM-scaling for A100/V100/T4 on Colab/Kaggle
 
 ## 📦 Installation
 
@@ -146,8 +149,8 @@ sife-ldm/
 │   └── tpu_large.json       # Large TPU config
 ├── scripts/
 │   └── prepare_data.py      # Data preparation
-├── train.py                 # Training script
-├── inference.py             # Inference script
+├── sife_ldm_colab.ipynb     # GPU-Accelerated Colab Notebook (Cloud-ready)
+├── sife_ldm_kaggle.ipynb    # Kaggle Training Notebook
 ├── requirements.txt         # Dependencies
 └── README.md               # This file
 ```
