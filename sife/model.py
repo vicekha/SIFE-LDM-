@@ -108,11 +108,36 @@ class ImageEncoder(nn.Module):
     
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        """x: RGB image (B, H, W, 3)"""
-        # Linear projection to complex feature space
-        # Distribute RGB info into complex features
+        """
+        x: RGB image (B, H, W, 3) in range [0, 1]
+        
+        Maps brightness to amplitude, and hue to phase.
+        This provides a physically meaningful starting point for the SIFE field.
+        """
+        # Split into RGB channels
+        r = x[..., 0:1]
+        g = x[..., 1:2]
+        b = x[..., 2:3]
+        
+        # Approximate brightness -> Amplitude [0, 1]
+        brightness = (r + g + b) / 3.0
+        
+        # Approximate hue -> Phase [-pi, pi]
+        # We define a 2D color vector (u, v) using RGB basis vectors at 0, 120, 240 degrees
+        u = r - 0.5 * g - 0.5 * b
+        v = (jnp.sqrt(3.0) / 2.0) * (g - b)
+        
+        # Compute phase angle
+        phase = jnp.arctan2(v, u)
+        
+        # Create initial physically-grounded field
+        # Broadcast the single phase/amp to all feature dimensions
+        # The subsequent Unet layers will mix these features
+        complex_x = brightness * jnp.exp(1j * phase)
+        
+        # Project using ComplexLinear to distribute into full feature space
         from .unet import ComplexLinear
-        h = ComplexLinear(self.features)(x.astype(jnp.complex64))
+        h = ComplexLinear(self.features)(complex_x)
         return h
 
 
@@ -284,7 +309,6 @@ class SIFELDM(nn.Module):
         
         # Add noise
         x_t = diffusion.q_sample(x, t, key, noise)
-        
         # Absolute phase for temporal conditioning
         abs_phase = self.config.sife.omega_0 * t.astype(jnp.float32)
         
@@ -297,15 +321,18 @@ class SIFELDM(nn.Module):
             action=batch.get('action')
         )
         
-        # Prediction Loss
+        # Prediction Loss (MSE between predicted and actual noise)
         mse_loss = jnp.mean(jnp.abs(epsilon_pred - noise) ** 2)
         
+        # Convert noise prediction back to x_0 (denoised field) prediction for physics constraints
+        x_0_pred = diffusion.predict_x0_from_epsilon(x_t, epsilon_pred, t)
+        
         # Add a small epsilon to prevent NaN gradients in jnp.angle and jnp.abs at exact zeros
-        # (This is common with ComplexModReLU which can output exactly 0 + 0j)
-        safe_epsilon_pred = epsilon_pred + (1e-8 + 1j * 1e-8)
+        # Apply this to the predicted field instead of the noise
+        safe_x_0_pred = x_0_pred + (1e-8 + 1j * 1e-8)
         
         # Phase Neighbor Coupling Loss (Grammar Physics)
-        theta = jnp.angle(safe_epsilon_pred)
+        theta = jnp.angle(safe_x_0_pred)
         
         # Compute cosine similarity between adjacent phases: mean(1 - cos(theta_i - theta_{i+1}))
         if theta.ndim == 3: # (B, seq_len, C)
@@ -334,15 +361,13 @@ class SIFELDM(nn.Module):
         if self.config.stability_lambda > 0:
             from .field import compute_landscape_curvature
             
-            # Reconstruct the physics SIFEConfig overrides dynamically
-            # Since SIFEConfig is a namedtuple/dataclass, we pass the raw arrays to a modified curvature function
-            # Or use dynamic arrays directly in compute_landscape_curvature
-            amp = jnp.sqrt(jnp.real(epsilon_pred)**2 + jnp.imag(epsilon_pred)**2 + 1e-12)
+            # Penalize unstable/shallow minima on the predicted field amplitude
+            amp = jnp.sqrt(jnp.real(x_0_pred)**2 + jnp.imag(x_0_pred)**2 + 1e-12)
             
             # The compute_landscape_curvature requires alpha, beta which we keep static.
             curvature = compute_landscape_curvature(amp, self.config.sife, dynamic_v=physics_params['v'])
             
-            # Penalize shallow minima: high curature needed
+            # Penalize shallow minima: high curvature needed
             stability_loss = jnp.mean(jnp.exp(-curvature))
             total_loss = total_loss + self.config.stability_lambda * stability_loss
         
