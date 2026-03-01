@@ -234,24 +234,54 @@ class SIFELDM(nn.Module):
         mask: Optional[Array] = None,
         deterministic: bool = False,
         abs_phase: Optional[Array] = None,
-        action: Optional[Array] = None
+        action: Optional[Array] = None,
+        labels: Optional[Array] = None,
+        use_context_mask: Optional[Array] = None
     ) -> Array:
         """
         Forward pass: predict noise given noisy input and timestep.
         
         Args:
-            x: Input complex field of shape (batch, seq_len, embed_dim)
+            x: Input complex field of shape (batch, seq_len, embed_dim) OR RGB image
             t: Timestep of shape (batch,)
             context: Optional conditioning context
             mask: Optional attention mask
             deterministic: Whether to use dropout
             abs_phase: Global phase conditioning
             action: Optional agent action
+            labels: Optional class labels for CFG
         
         Returns:
             Predicted noise in complex field
         """
-        # Unified Modality Architecture Selection
+        # 1. Feature Encoding (RGB -> Complex Latent)
+        is_rgb = x.ndim == 4 and x.shape[-1] == 3
+        if is_rgb:
+            x = ImageEncoder(features=self.config.embed_dim, name='image_encoder')(x)
+            
+        # 2. Contextual Encoding (Labels -> Complex Context)
+        if labels is not None and self.config.num_classes > 0:
+            label_context = LabelEncoder(
+                num_classes=self.config.num_classes, 
+                features=self.config.embed_dim,
+                name='label_encoder'
+            )(labels)
+            
+            # Apply CFG dropout if mask is provided (for training)
+            if use_context_mask is not None:
+                mask_val = use_context_mask[:, jnp.newaxis].astype(jnp.complex64)
+                label_context = label_context * mask_val
+                
+            # Add sequence dimension for transformer cross-attention
+            label_context = label_context[:, jnp.newaxis, :]
+            
+            # If explicit context provided, merge; otherwise use labels
+            if context is None:
+                context = label_context
+            else:
+                context = jnp.concatenate([context, label_context], axis=1)
+
+        # 3. Patching for Images
         from .unet import ComplexPatchEncoder, UnifiedSIFETransformer, ComplexLinear
         
         is_4d = x.ndim == 4
@@ -263,6 +293,7 @@ class SIFELDM(nn.Module):
             # Encode down to 1D
             x = ComplexPatchEncoder(patch_size=P, embed_dim=self.config.embed_dim)(x)
             
+        # 4. Core Transformer
         model = UnifiedSIFETransformer(
             features=self.config.embed_dim,
             num_heads=self.config.num_heads,
@@ -272,6 +303,7 @@ class SIFELDM(nn.Module):
         
         out = model(x, t, context, abs_phase, action, mask, deterministic)
         
+        # 5. Spatial Decoding (1D -> 4D)
         if self.config.is_image and is_4d:
             # Decode 1D back to 4D
             B, H, W, C = orig_shape
@@ -293,48 +325,63 @@ class SIFELDM(nn.Module):
         diffusion: GaussianDiffusion
     ) -> Array:
         """Compute training loss."""
-        x = batch['complex_embedding']
+        # 1. Input Processing
+        x_raw = batch.get('complex_embedding')
+        if x_raw is None and 'images' in batch:
+            # If raw images provided, encode them within the model's parameters
+            # This requires initializing the ImageEncoder params inside the model
+            # We apply the model's own encoding logic by calling the model with raw images
+            # But get_loss needs the complex latent to noise it.
+            # So we use a separate encoding pass.
+            x = self.apply(
+                params, batch['images'],
+                method=self.encode_images
+            )
+        else:
+            x = x_raw
+            
         batch_size = x.shape[0]
         
-        # Sample timesteps
+        # 2. Sample timesteps
         t = jax.random.randint(
             key, (batch_size,), 0, diffusion.num_timesteps
         )
         
-        # Sample noise
-        noise = jax.random.normal(key, x.shape, dtype=jnp.float32)
+        # 3. Sample and add noise
+        key, noise_key = jax.random.split(key)
+        noise = jax.random.normal(noise_key, x.shape, dtype=jnp.float32)
         noise = noise + 1j * jax.random.normal(
-            jax.random.split(key)[0], x.shape, dtype=jnp.float32
+            jax.random.split(noise_key)[0], x.shape, dtype=jnp.float32
         )
         
-        # Add noise
         x_t = diffusion.q_sample(x, t, key, noise)
-        # Absolute phase for temporal conditioning
-        abs_phase = self.config.sife.omega_0 * t.astype(jnp.float32)
         
-        # Predict noise
+        # 4. Context Processing
+        context = batch.get('context')
+        labels = batch.get('labels')
+        use_context_mask = batch.get('use_context_mask')
+        
+        # 5. Predict noise
+        abs_phase = self.config.sife.omega_0 * t.astype(jnp.float32)
         epsilon_pred = self.apply(
             params, x_t, t,
-            context=batch.get('context'),
+            context=context,
+            labels=labels,
+            use_context_mask=use_context_mask,
             deterministic=True,
             abs_phase=abs_phase,
             action=batch.get('action')
         )
         
-        # Prediction Loss (MSE between predicted and actual noise)
+        # 6. Loss Calculation
+        # MSE loss must be real
         mse_loss = jnp.mean(jnp.abs(epsilon_pred - noise) ** 2)
         
-        # Convert noise prediction back to x_0 (denoised field) prediction for physics constraints
+        # Physics-based regularization
         x_0_pred = diffusion.predict_x0_from_epsilon(x_t, epsilon_pred, t)
-        
-        # Add a small epsilon to prevent NaN gradients in jnp.angle and jnp.abs at exact zeros
-        # Apply this to the predicted field instead of the noise
         safe_x_0_pred = x_0_pred + (1e-8 + 1j * 1e-8)
         
-        # Phase Neighbor Coupling Loss (Grammar Physics)
         theta = jnp.angle(safe_x_0_pred)
-        
-        # Compute cosine similarity between adjacent phases: mean(1 - cos(theta_i - theta_{i+1}))
         if theta.ndim == 3: # (B, seq_len, C)
             phase_diff = theta[:, 1:, :] - theta[:, :-1, :]
             coupling_loss = jnp.mean(1 - jnp.cos(phase_diff))
@@ -343,35 +390,43 @@ class SIFELDM(nn.Module):
             phase_diff_w = theta[:, :, 1:, :] - theta[:, :, :-1, :]
             coupling_loss = 0.5 * (jnp.mean(1 - jnp.cos(phase_diff_h)) + jnp.mean(1 - jnp.cos(phase_diff_w)))
             
-        # Predict Dynamic Meta-Physics from Context
         physics_params = predict_meta_physics(
-            context=batch.get('context'), 
+            context=context, 
             batch_size=batch_size,
             base_v=1.0,
             base_lambda_res=self.config.sife.lambda_res,
             base_omega_0=self.config.sife.omega_0
         )
         
-        # Evaluate global Phase Coupling using dynamic lambda_res
-        # Reshape to easily broadcast over sequence
         dyn_lambda = physics_params['lambda_res'].reshape(batch_size, 1)
-        total_loss = mse_loss + jnp.mean(dyn_lambda * self.config.phase_coupling_lambda * coupling_loss)
+        if dyn_lambda.ndim < coupling_loss.ndim:
+            dyn_lambda = dyn_lambda.reshape(dyn_lambda.shape + (1,) * (coupling_loss.ndim - dyn_lambda.ndim))
+            
+        # Optimization: Physics Loss Annealing
+        # As training progresses (t -> 0 in diffusion, but also globally over steps), 
+        # we might want to reduce physics guidance to allow for more stochastic detail.
+        # Here we use the diffusion timestep t as a proxy for 'detail level'.
+        # Early diffusion steps (large t) should have strong physics.
+        # Late diffusion steps (small t) should focus on pixel-perfect noise prediction.
+        anneal_factor = (t.astype(jnp.float32) / diffusion.num_timesteps)
+        anneal_factor = anneal_factor.reshape((batch_size,) + (1,) * (coupling_loss.ndim - 1))
         
-        # Stability Regularization (Landscape Hessian)
+        total_loss = mse_loss + jnp.mean(anneal_factor * dyn_lambda * self.config.phase_coupling_lambda * coupling_loss)
+        
         if self.config.stability_lambda > 0:
             from .field import compute_landscape_curvature
-            
-            # Penalize unstable/shallow minima on the predicted field amplitude
-            amp = jnp.sqrt(jnp.real(x_0_pred)**2 + jnp.imag(x_0_pred)**2 + 1e-12)
-            
-            # The compute_landscape_curvature requires alpha, beta which we keep static.
+            amp = jnp.abs(x_0_pred) + 1e-12
             curvature = compute_landscape_curvature(amp, self.config.sife, dynamic_v=physics_params['v'])
-            
-            # Penalize shallow minima: high curvature needed
             stability_loss = jnp.mean(jnp.exp(-curvature))
-            total_loss = total_loss + self.config.stability_lambda * stability_loss
+            total_loss = total_loss + self.config.stability_lambda * anneal_factor.mean() * stability_loss
         
-        return total_loss
+        # CRITICAL: Ensure loss is strictly real-valued to avoid JAX/XLA casting warnings
+        return jnp.real(total_loss)
+
+    @nn.compact
+    def encode_images(self, images: Array) -> Array:
+        """Helper for encoding images using model's own parameters."""
+        return ImageEncoder(features=self.config.embed_dim, name='image_encoder')(images)
 
 
 def create_model(
@@ -390,19 +445,18 @@ def create_model(
     """
     model = SIFELDM(config)
     
+    # Initialize with raw RGB images and labels so all sub-encoders (ImageEncoder, LabelEncoder)
+    # and attention kernels are registered in the parameter tree.
     if config.is_image:
-        dummy_shape = (config.batch_size, config.image_size[0], config.image_size[1], config.embed_dim)
+        dummy_x = jnp.zeros((config.batch_size, config.image_size[0], config.image_size[1], 3), dtype=jnp.float32)
     else:
-        dummy_shape = (config.batch_size, config.max_seq_len, config.embed_dim)
+        dummy_x = jnp.zeros((config.batch_size, config.max_seq_len, config.embed_dim), dtype=jnp.complex64)
         
-    dummy_x = jax.random.normal(key, dummy_shape)
-    dummy_x = dummy_x + 1j * jax.random.normal(jax.random.split(key)[0], dummy_shape)
     dummy_t = jnp.zeros((config.batch_size,), dtype=jnp.int32)
-    # Dummy context (B, 1, embed_dim) complex — forces Flax to register cross-attention weights
-    dummy_context = jnp.zeros((config.batch_size, 1, config.embed_dim), dtype=jnp.complex64)
+    dummy_labels = jnp.zeros((config.batch_size,), dtype=jnp.int32) if config.num_classes > 0 else None
     
-    # Initialize with context so ComplexCrossAttention parameters (Wr, Wi, etc.) are created
-    params = model.init(key, dummy_x, dummy_t, context=dummy_context, deterministic=True)
+    # Initialize model
+    params = model.init(key, dummy_x, dummy_t, labels=dummy_labels, deterministic=True)
     
     return model, params
 
@@ -415,14 +469,21 @@ def create_optimizer(
     
     Uses AdamW with cosine decay and linear warmup.
     """
-    # Learning rate schedule
-    def lr_schedule(step):
-        return cosine_lr_schedule(
-            step,
-            config.max_steps,
-            config.warmup_steps,
-            config.learning_rate
-        )
+    # Learning rate schedule using native optax implementation
+    # Note: Optax's warmup_cosine_decay_schedule expects decay_steps to be the 
+    # number of steps AFTER the warmup. So we calculate it carefully.
+    actual_warmup = min(config.warmup_steps, max(1, config.max_steps // 10))
+    actual_decay = max(1, config.max_steps - actual_warmup)
+    
+    print(f"DEBUG: max_steps={config.max_steps}, warmup={actual_warmup}, decay={actual_decay}")
+    
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=1e-7,
+        peak_value=config.learning_rate,
+        warmup_steps=actual_warmup,
+        decay_steps=actual_decay,
+        end_value=config.learning_rate * 0.05 # Decay to 5% of peak
+    )
     
     # Combined optimizer with clipping
     optimizer = optax.chain(
@@ -430,7 +491,7 @@ def create_optimizer(
         optax.adamw(
             learning_rate=lr_schedule,
             b1=0.9,
-            b2=0.999,
+            b2=0.99, # Slightly faster decay for noisy gradients
             eps=1e-8,
             weight_decay=config.weight_decay
         )

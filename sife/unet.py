@@ -28,6 +28,40 @@ Array = jnp.ndarray
 PRNGKey = jnp.ndarray
 
 
+# Utility functions (moved to top for class availability)
+
+def complex_he_init(key: PRNGKey, shape: Tuple[int, ...]) -> Array:
+    """
+    He initialization adapted for complex weights.
+    
+    For complex weights, we initialize both real and imaginary parts
+    so the total variance is scaled by 2/fan_in.
+    """
+    fan_in = math.prod(shape[:-1])
+    std = math.sqrt(1.0 / fan_in)  # 1.0 instead of 2.0 to split variance 50/50
+    
+    key1, key2 = jax.random.split(key)
+    Wr = jax.random.normal(key1, shape) * std
+    Wi = jax.random.normal(key2, shape) * std
+    
+    return Wr + 1j * Wi
+
+
+def complex_xavier_init(key: PRNGKey, shape: Tuple[int, ...]) -> Array:
+    """
+    Xavier/Glorot initialization for complex weights.
+    """
+    fan_in = math.prod(shape[:-1])
+    fan_out = shape[-1]
+    std = math.sqrt(1.0 / (fan_in + fan_out)) # 1.0 instead of 2.0 to split variance 50/50
+    
+    key1, key2 = jax.random.split(key)
+    Wr = jax.random.normal(key1, shape) * std
+    Wi = jax.random.normal(key2, shape) * std
+    
+    return Wr + 1j * Wi
+
+
 class ComplexLinear(nn.Module):
     """
     Complex-valued linear layer.
@@ -39,7 +73,7 @@ class ComplexLinear(nn.Module):
     """
     features: int
     use_bias: bool = True
-    kernel_init: Any = initializers.lecun_normal()
+    kernel_init: Any = complex_xavier_init
     bias_init: Any = initializers.zeros
     
     @nn.compact
@@ -55,6 +89,7 @@ class ComplexLinear(nn.Module):
         in_features = x.shape[-1]
         
         # Real and imaginary weight matrices
+        # Flax nn.compact handles unique key generation per param name during init
         Wr = self.param('Wr', self.kernel_init, (in_features, self.features))
         Wi = self.param('Wi', self.kernel_init, (in_features, self.features))
         
@@ -195,29 +230,32 @@ class ComplexLayerNorm(nn.Module):
     """
     Complex-valued layer normalization.
     
-    Normalizes both amplitude and phase independently while
-    preserving the complex structure of the data.
+    Normalizes the field energy (amplitude) while strictly preserving
+    the logical phase structure (Logos).
     """
     epsilon: float = 1e-6
     
     @nn.compact
     def __call__(self, x: Array) -> Array:
-        # Safe amplitude
+        # Compute safe amplitude
         amp = jnp.sqrt(jnp.real(x)**2 + jnp.imag(x)**2 + self.epsilon)
-        amp_mean = jnp.mean(amp, axis=-1, keepdims=True)
-        amp_var = jnp.var(amp, axis=-1, keepdims=True)
-        amp_norm = (amp - amp_mean) / jnp.sqrt(amp_var + self.epsilon)
         
-        # Learnable scale and shift (apply only to amplitude to protect phase geometry)
+        # Normalize by mean magnitude to preserve relative structure
+        mean_amp = jnp.mean(amp, axis=-1, keepdims=True)
+        # Note: We don't subtract the mean from the amplitude here because 
+        # centered amplitudes can be negative, which flips the phase θ by π.
+        # Instead, we perform a scale-only normalization.
+        
+        amp_norm = amp / (mean_amp + self.epsilon)
+        
+        # Learnable scale (Pathos intensity)
         gamma = self.param('gamma', initializers.ones, (x.shape[-1],))
-        beta = self.param('beta', initializers.zeros, (x.shape[-1],))
         
-        # Shift and scale the amplitude
-        amp_shifted = gamma * amp_norm + beta
+        # Apply scaling
+        amp_scaled = gamma * amp_norm
         
-        # Reconstruct complex result stably
-        # This strictly preserves phase coherence because we only scaled the amplitude
-        return amp_shifted * (x / (amp + self.epsilon))
+        # Reconstruct complex result: Ψ_norm = (A_norm * γ) * exp(i*θ)
+        return amp_scaled * (x / (amp + self.epsilon))
 
 
 class ComplexDropout(nn.Module):
@@ -996,38 +1034,7 @@ class SIFEUNet(nn.Module):
         return amp_noise, phase_noise
 
 
-# Utility functions
-
-def complex_he_init(key: PRNGKey, shape: Tuple[int, ...]) -> Array:
-    """
-    He initialization adapted for complex weights.
-    
-    For complex weights, we initialize both real and imaginary parts
-    so the total variance is scaled by 2/fan_in.
-    """
-    fan_in = math.prod(shape[:-1])
-    std = math.sqrt(1.0 / fan_in)  # 1.0 instead of 2.0 to split variance 50/50
-    
-    key1, key2 = jax.random.split(key)
-    Wr = jax.random.normal(key1, shape) * std
-    Wi = jax.random.normal(key2, shape) * std
-    
-    return Wr + 1j * Wi
-
-
-def complex_xavier_init(key: PRNGKey, shape: Tuple[int, ...]) -> Array:
-    """
-    Xavier/Glorot initialization for complex weights.
-    """
-    fan_in = math.prod(shape[:-1])
-    fan_out = shape[-1]
-    std = math.sqrt(1.0 / (fan_in + fan_out)) # 1.0 instead of 2.0 to split variance 50/50
-    
-    key1, key2 = jax.random.split(key)
-    Wr = jax.random.normal(key1, shape) * std
-    Wi = jax.random.normal(key2, shape) * std
-    
-    return Wr + 1j * Wi
+# Additional utility functions
 
 class ComplexResidualBlock2D(nn.Module):
     """
