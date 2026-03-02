@@ -138,7 +138,12 @@ class ImageEncoder(nn.Module):
         # Project using ComplexLinear to distribute into full feature space
         from .unet import ComplexLinear
         h = ComplexLinear(self.features)(complex_x)
-        return h
+        
+        # Latent Scaling: Ensure latents have roughly unit variance for diffusion.
+        # This is critical for SNR in early training.
+        # Standard LDMs use ~0.18 (down-scaling), but since our random init is small, we scale UP.
+        # Scale 20.0 targets variance ~0.4, making the signal visible amidst variance-2.0 noise.
+        return h * 20.0
 
 
 class ImageDecoder(nn.Module):
@@ -559,20 +564,31 @@ def train_step(
     key, subkey = jax.random.split(state.key)
     
     # Compute loss and gradients
-    def loss_fn(params):
-        return model.get_loss(params, batch, subkey, diffusion)
+    def loss_fn(p):
+        return model.get_loss(p, batch, subkey, diffusion)
+        
+    loss, grads = jax.value_and_grad(loss_fn)(state.params)
     
-    loss, grads = value_and_grad(loss_fn)(state.params)
+    # CRITICAL: Resolve ComplexWarning by forcing real parameters to have real gradients.
+    # JAX sometimes yields tiny imaginary residuals (eps*1j) during complex backprop.
+    def force_real_grad(g, p):
+        if g is None:
+            return None
+        if jnp.iscomplexobj(p):
+            return g  # Keep complex if parameter is complex
+        return jnp.real(g) # Strip imaginary noise for real parameters
+        
+    grads = jax.tree_util.tree_map(force_real_grad, grads, state.params)
     
     # Apply gradients
-    updates, opt_state = optimizer.update(grads, state.opt_state, params=state.params)
-    params = optax.apply_updates(state.params, updates)
+    updates, new_opt_state = optimizer.update(grads, state.opt_state, params=state.params)
+    new_params = optax.apply_updates(state.params, updates)
     
     # Update state
     new_state = TrainState(
         step=state.step + 1,
-        params=params,
-        opt_state=opt_state,
+        params=new_params,
+        opt_state=new_opt_state,
         key=key
     )
     
