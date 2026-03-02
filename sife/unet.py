@@ -33,33 +33,22 @@ PRNGKey = jnp.ndarray
 def complex_he_init(key: PRNGKey, shape: Tuple[int, ...]) -> Array:
     """
     He initialization adapted for complex weights.
-    
-    For complex weights, we initialize both real and imaginary parts
-    so the total variance is scaled by 2/fan_in.
+    Returns real values scaled so that total complex variance is 2/fan_in.
     """
     fan_in = math.prod(shape[:-1])
-    std = math.sqrt(1.0 / fan_in)  # 1.0 instead of 2.0 to split variance 50/50
-    
-    key1, key2 = jax.random.split(key)
-    Wr = jax.random.normal(key1, shape) * std
-    Wi = jax.random.normal(key2, shape) * std
-    
-    return Wr + 1j * Wi
+    std = math.sqrt(1.0 / fan_in)  # Each component has 1/fan_in variance
+    return jax.random.normal(key, shape) * std
 
 
 def complex_xavier_init(key: PRNGKey, shape: Tuple[int, ...]) -> Array:
     """
     Xavier/Glorot initialization for complex weights.
+    Returns real values scaled so that total complex variance is 2/(fan_in + fan_out).
     """
     fan_in = math.prod(shape[:-1])
     fan_out = shape[-1]
-    std = math.sqrt(1.0 / (fan_in + fan_out)) # 1.0 instead of 2.0 to split variance 50/50
-    
-    key1, key2 = jax.random.split(key)
-    Wr = jax.random.normal(key1, shape) * std
-    Wi = jax.random.normal(key2, shape) * std
-    
-    return Wr + 1j * Wi
+    std = math.sqrt(1.0 / (fan_in + fan_out)) # Each component has 1/(fan_in + fan_out) variance
+    return jax.random.normal(key, shape) * std
 
 
 class ComplexLinear(nn.Module):
@@ -136,6 +125,7 @@ class ComplexConv(nn.Module):
         kh, kw = self.kernel_size
         
         # Real and imaginary kernels
+        # Each kernel uses lecun_normal which is real, ensuring Wr/Wi remain real
         Wr = self.param('Wr', self.kernel_init, (kh, kw, in_features, self.features))
         Wi = self.param('Wi', self.kernel_init, (kh, kw, in_features, self.features))
         
