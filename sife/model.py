@@ -408,22 +408,25 @@ class SIFELDM(nn.Module):
             dyn_lambda = dyn_lambda.reshape(dyn_lambda.shape + (1,) * (coupling_loss.ndim - dyn_lambda.ndim))
             
         # Optimization: Physics Loss Annealing
-        # As training progresses (t -> 0 in diffusion, but also globally over steps), 
-        # we might want to reduce physics guidance to allow for more stochastic detail.
-        # Here we use the diffusion timestep t as a proxy for 'detail level'.
-        # Early diffusion steps (large t) should have strong physics.
-        # Late diffusion steps (small t) should focus on pixel-perfect noise prediction.
-        anneal_factor = (t.astype(jnp.float32) / diffusion.num_timesteps)
+        # Physics loss must be ZERO at high noise (t->T) because x_0_pred is highly unstable 
+        # and dominated by amplified noise. We only want structural constraints precisely
+        # when the image is forming (t->0).
+        anneal_factor = 1.0 - (t.astype(jnp.float32) / diffusion.num_timesteps)
+        anneal_factor = jnp.power(anneal_factor, 2.0) # Quadratic decay for even less physics at high noise
         anneal_factor = anneal_factor.reshape((batch_size,) + (1,) * (coupling_loss.ndim - 1))
         
-        total_loss = mse_loss + jnp.mean(anneal_factor * dyn_lambda * self.config.phase_coupling_lambda * coupling_loss)
+        # Reduce global impact of physics relative to MSE
+        safe_coupling_lambda = self.config.phase_coupling_lambda * 0.1
+        safe_stability_lambda = self.config.stability_lambda * 0.1
+        
+        total_loss = mse_loss + jnp.mean(anneal_factor * dyn_lambda * safe_coupling_lambda * coupling_loss)
         
         if self.config.stability_lambda > 0:
             from .field import compute_landscape_curvature
             amp = jnp.abs(x_0_pred) + 1e-12
             curvature = compute_landscape_curvature(amp, self.config.sife, dynamic_v=physics_params['v'])
             stability_loss = jnp.mean(jnp.exp(-curvature))
-            total_loss = total_loss + self.config.stability_lambda * anneal_factor.mean() * stability_loss
+            total_loss = total_loss + safe_stability_lambda * anneal_factor.mean() * stability_loss
         
         # CRITICAL: Ensure loss is strictly real-valued to avoid JAX/XLA casting warnings
         return jnp.real(total_loss)
