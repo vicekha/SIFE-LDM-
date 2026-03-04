@@ -694,7 +694,7 @@ class ComplexTransformerBlock(nn.Module):
             )(h, deterministic)
         else:
             h = ComplexLinear(self.features * self.mlp_ratio)(h)
-            h = ComplexModReLU()(h)
+            h = ComplexGELU()(h) # Switched from ModReLU (identity at init) to GELU for better gradients
             h = ComplexDropout(self.dropout_rate)(h, deterministic)
             h = ComplexLinear(self.features)(h)
         x = x + h
@@ -1294,33 +1294,11 @@ class ComplexPatchEncoder(nn.Module):
         # Project each patch to embed_dim using ComplexLinear
         x = ComplexLinear(self.embed_dim)(x)
         
-        # 2D Rotary Positional Encoding (RoPE) injected into Phase
-        # We split the embed_dim into two halves: row features and col features
-        half_dim = self.embed_dim // 2
-        
-        row_pos = jnp.arange(H // P)
-        col_pos = jnp.arange(W // P)
-        
-        # Frequencies (using math.log for scalar compilation)
-        freqs = jnp.exp(-jnp.arange(0, half_dim, 2) * (math.log(10000.0) / half_dim))
-        
-        # Row Phase (H/P, half_dim)
-        row_angles = row_pos[:, jnp.newaxis] * freqs[jnp.newaxis, :]
-        row_angles = jnp.repeat(row_angles, 2, axis=-1)
-        
-        # Col Phase (W/P, half_dim)
-        col_angles = col_pos[:, jnp.newaxis] * freqs[jnp.newaxis, :]
-        col_angles = jnp.repeat(col_angles, 2, axis=-1)
-        
-        # Combine into (H/P, W/P, embed_dim)
-        row_angles_mesh = jnp.broadcast_to(row_angles[:, jnp.newaxis, :], (H // P, W // P, half_dim))
-        col_angles_mesh = jnp.broadcast_to(col_angles[jnp.newaxis, :, :], (H // P, W // P, half_dim))
-        
-        grid_angles = jnp.concatenate([row_angles_mesh, col_angles_mesh], axis=-1)
-        grid_angles = grid_angles.reshape(seq_len, self.embed_dim)
-        
-        # Inject RoPE via complex rotation
-        x = x * jnp.exp(1j * grid_angles)[jnp.newaxis, :, :]      
+        # Additive Positional Embedding (standard for Diffusion Transformers)
+        # Phase-based RoPE was found to be invariant under Hermitian dot-product attention
+        pos_emb_r = self.param('pos_emb_r', jax.nn.initializers.normal(stddev=0.02), (seq_len, self.embed_dim))
+        pos_emb_i = self.param('pos_emb_i', jax.nn.initializers.normal(stddev=0.02), (seq_len, self.embed_dim))
+        x = x + (pos_emb_r + 1j * pos_emb_i)
         
         return x
 

@@ -80,8 +80,8 @@ class SIFELDMConfig(NamedTuple):
     weight_decay: float = 0.01
     warmup_steps: int = 1000
     max_steps: int = 100000
-    phase_coupling_lambda: float = 0.1
-    stability_lambda: float = 0.01
+    phase_coupling_lambda: float = 0.05
+    stability_lambda: float = 0.0501
     symbols_vocab_size: int = 1024
     
     # Sequence configuration
