@@ -212,8 +212,9 @@ class ComplexConv1D(nn.Module):
             out_r = out_r + br
             out_i = out_i + bi
         
-        # Remove batch and spatial dimensions
-        return (out_r + 1j * out_i)[0, :, 0, :]
+        # Reshape back from (B, L, 1, C) to (B, L, C)
+        out = (out_r + 1j * out_i)
+        return out[:, :, 0, :]
 
 
 class ComplexLayerNorm(nn.Module):
@@ -1393,8 +1394,10 @@ class UnifiedSIFETransformer(nn.Module):
             a_proj = ComplexLinear(self.features)(action_emb)
             h = h + a_proj[:, jnp.newaxis, :]
             
-        if abs_phase is not None:
-            h = h * jnp.exp(1j * abs_phase)[:, jnp.newaxis, jnp.newaxis]
+        # Note: abs_phase based rotation of input features is removed to stabilize training.
+        # It creates a highly non-stationary coordinate system that conflicts with standard diffusion MSE.
+        # abs_phase remains available as a conditioning signal if needed.
+        pass
             
         # Intermediate sequence length halving for dense efficiency (Phase-Coherent Token Merging)
         do_pooling = (self.depth >= 6)
