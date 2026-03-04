@@ -299,15 +299,23 @@ class PhaseRouter(nn.Module):
     def __call__(self, x: Array) -> Tuple[Array, Array]:
         # x shape: (batch, seq, features)
         
-        # Calculate the phase angle (-pi to pi)
-        phase = jnp.angle(x)
+        # Use raw real/imag components to avoid non-differentiable jnp.angle() jumps
+        x_r, x_i = jnp.real(x), jnp.imag(x)
         
-        # Calculate circular mean of phase across feature dimension for each token
-        mean_cos = jnp.mean(jnp.cos(phase), axis=-1)
-        mean_sin = jnp.mean(jnp.sin(phase), axis=-1)
+        # Calculate differentiable phase features (L2 normalized coordinates)
+        eps = 1e-6
+        norm = jnp.sqrt(x_r**2 + x_i**2 + eps)
+        cos_theta = x_r / norm
+        sin_theta = x_i / norm
+        
+        # Average across features to get token-level phase direction
+        mean_cos = jnp.mean(cos_theta, axis=-1)
+        mean_sin = jnp.mean(sin_theta, axis=-1)
+        
+        # Map to (0, 1) using differentiable arctan2 via atan2(sin, cos)
+        # Note: arctan2 is still discontinuous at the cut, but better than angle(x)
+        # because the input is already normalized.
         token_phase = jnp.arctan2(mean_sin, mean_cos)
-        
-        # Map Phase from (-pi, pi) to (0, 1)
         normalized_phase = (token_phase + jnp.pi) / (2 * jnp.pi)
         
         # Map to expert sectors
@@ -448,9 +456,9 @@ class ComplexTimeEmbedding(nn.Module):
         amp_part = emb[:, :half_dim]
         phase_part = emb[:, half_dim:]
         
-        # Amplitude: positive values from sin/cos
+        # Amplitude: Ensure positive values with softplus to maintain gradient flow
         amplitude = nn.Dense(self.dim)(amp_part)
-        amplitude = nn.relu(amplitude) + 0.1  # Ensure positive
+        amplitude = nn.softplus(amplitude) + 1e-3  # Softplus is more gradient-friendly than relu+0.1
         
         # Phase: normalize to [0, 2π)
         phase = nn.Dense(self.dim)(phase_part)
@@ -1327,12 +1335,14 @@ class PhasePool(nn.Module):
     
     @nn.compact
     def __call__(self, x: Array) -> Tuple[Array, Array]:
-        # x is (B, N, d)
-        phase = jnp.angle(x)
+        # Use differentiable real/imag components instead of jnp.angle()
+        x_r, x_i = jnp.real(x), jnp.imag(x)
+        eps = 1e-6
+        norm = jnp.sqrt(x_r**2 + x_i**2 + eps)
         
-        # Combine into phase features (circular mean)
-        mean_cos = jnp.mean(jnp.cos(phase), axis=-1, keepdims=True)
-        mean_sin = jnp.mean(jnp.sin(phase), axis=-1, keepdims=True)
+        # Phase features: (B, N, 2)
+        mean_cos = jnp.mean(x_r / norm, axis=-1, keepdims=True)
+        mean_sin = jnp.mean(x_i / norm, axis=-1, keepdims=True)
         phase_features = jnp.concatenate([mean_cos, mean_sin], axis=-1)
         
         # Linear layer to predict assignment logits to k clusters
