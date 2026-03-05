@@ -366,9 +366,9 @@ class SIFELDM(nn.Module):
         labels = batch.get('labels')
         use_context_mask = batch.get('use_context_mask')
         
-        # 5. Predict noise
+        # 5. Predict target (epsilon, x0, or v)
         abs_phase = self.config.sife.omega_0 * t.astype(jnp.float32)
-        epsilon_pred = self.apply(
+        model_output = self.apply(
             params, x_t, t,
             context=context,
             labels=labels,
@@ -379,11 +379,20 @@ class SIFELDM(nn.Module):
         )
         
         # 6. Loss Calculation
+        if diffusion.config.prediction_type == 'v':
+            target = diffusion.predict_v_from_x0_epsilon(x, noise, t)
+            x_0_pred = diffusion.predict_x0_from_v(x_t, model_output, t)
+        elif diffusion.config.prediction_type == 'x0':
+            target = x
+            x_0_pred = model_output
+        else: # epsilon
+            target = noise
+            x_0_pred = diffusion.predict_x0_from_epsilon(x_t, model_output, t)
+
         # MSE loss must be real
-        mse_loss = jnp.mean(jnp.abs(epsilon_pred - noise) ** 2)
+        mse_loss = jnp.mean(jnp.abs(model_output - target) ** 2)
         
         # Physics-based regularization
-        x_0_pred = diffusion.predict_x0_from_epsilon(x_t, epsilon_pred, t)
         safe_x_0_pred = x_0_pred + (1e-8 + 1j * 1e-8)
         
         theta = jnp.angle(safe_x_0_pred)

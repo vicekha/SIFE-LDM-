@@ -32,8 +32,8 @@ class DiffusionConfig(NamedTuple):
     num_timesteps: int = 1000
     beta_start: float = 0.0001
     beta_end: float = 0.02
-    schedule: str = 'linear'  # 'linear', 'cosine', 'sqrt'
-    prediction_type: str = 'epsilon'  # 'epsilon', 'x0', 'v'
+    schedule: str = 'cosine'  # 'linear', 'cosine', 'sqrt'
+    prediction_type: str = 'v'  # 'epsilon', 'x0', 'v'
     clip_denoised: bool = True
     clip_range: Tuple[float, float] = (-1.0, 1.0)
 
@@ -266,7 +266,8 @@ class GaussianDiffusion:
             x_0 = model_output
             epsilon = self.predict_epsilon_from_x0(x_t, x_0, t)
         elif self.config.prediction_type == 'v':
-            x_0 = self.predict_x0_from_v(x_t, model_output, t)
+            v = model_output
+            x_0 = self.predict_x0_from_v(x_t, v, t)
             epsilon = self.predict_epsilon_from_x0(x_t, x_0, t)
         
         if clip_denoised:
@@ -344,7 +345,8 @@ class DDIMSampler:
             x_0 = model_output
             epsilon = self.diffusion.predict_epsilon_from_x0(x_t, x_0, t_array)
         elif self.diffusion.config.prediction_type == 'v':
-            x_0 = self.diffusion.predict_x0_from_v(x_t, model_output, t_array)
+            v = model_output
+            x_0 = self.diffusion.predict_x0_from_v(x_t, v, t_array)
             epsilon = self.diffusion.predict_epsilon_from_x0(x_t, x_0, t_array)
         
         if clip_denoised:
@@ -489,10 +491,19 @@ class EulerMaruyamaSampler:
         t_idx = jnp.clip(int(t * self.diffusion.num_timesteps), 0, self.diffusion.num_timesteps - 1)
         t_array = jnp.array([t_idx], dtype=jnp.int32)
         
-        # Predict noise using standard parameterized network
-        epsilon = model(x_t, t_array, context)
+        # Predict relevant noise/target
+        model_output = model(x_t, t_array, context)
         
-        # Compute Score: s_theta = -epsilon / sqrt(1 - alpha_bar)
+        # Consistent transformation to Score: s_theta = -epsilon / sqrt(1 - alpha_bar)
+        if self.diffusion.config.prediction_type == 'epsilon':
+            epsilon = model_output
+        elif self.diffusion.config.prediction_type == 'x0':
+            epsilon = self.diffusion.predict_epsilon_from_x0(x_t, model_output, t_array)
+        elif self.diffusion.config.prediction_type == 'v':
+            # epsilon = sqrt(alpha) * v + sqrt(1-alpha) * x_t
+            x_0 = self.diffusion.predict_x0_from_v(x_t, model_output, t_array)
+            epsilon = self.diffusion.predict_epsilon_from_x0(x_t, x_0, t_array)
+            
         sqrt_1m_alpha = self.diffusion.sqrt_one_minus_alphas_cumprod[t_idx]
         score = -epsilon / jnp.maximum(sqrt_1m_alpha, 1e-5)
         
@@ -607,14 +618,20 @@ class EulerMaruyamaSampler:
                              0, self.diffusion.num_timesteps - 1)
             t_array = jnp.array([t_idx], dtype=jnp.int32)
             
-            # Conditional noise prediction
-            eps_cond = model(x, t_array, context)
-            # Unconditional noise prediction (null context)
-            eps_uncond = model(x, t_array, None)
+            # Predict guided v or epsilon
+            pred_cond = model(x, t_array, context)
+            pred_uncond = model(x, t_array, None)
             
-            # CFG blend: steer epsilon toward the class
-            eps_guided = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+            # Guidane in target space (consistent with v-prediction distillation)
+            pred_guided = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
             
+            # Convert guided prediction to score
+            if self.diffusion.config.prediction_type == 'v':
+                x0_guided = self.diffusion.predict_x0_from_v(x, pred_guided, t_array)
+                eps_guided = self.diffusion.predict_epsilon_from_x0(x, x0_guided, t_array)
+            else:
+                eps_guided = pred_guided
+
             # Apply SDE step with the guided score
             sqrt_1m_alpha = self.diffusion.sqrt_one_minus_alphas_cumprod[t_idx]
             score = -eps_guided / jnp.maximum(sqrt_1m_alpha, 1e-5)
