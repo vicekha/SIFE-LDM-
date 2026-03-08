@@ -29,6 +29,7 @@ import json
 import os
 
 # Import local modules
+from .optim import andi
 from .field import (
     SIFEConfig, SIFField, initialize_field, compute_hamiltonian,
     truth_potential, evolve_field, leapfrog_step
@@ -478,42 +479,81 @@ def create_model(
     return model, params
 
 
+def _wsd_schedule(
+    peak_value: float,
+    warmup_steps: int,
+    stable_steps: int,
+    decay_steps: int,
+    init_value: float = 1e-7,
+    end_value: float = 0.0,
+) -> optax.Schedule:
+    """
+    Warmup-Stable-Decay (WSD) learning rate schedule.
+
+    Recommended for ANDI and other structural/spectral optimizers per the paper
+    (Semenov et al., 2025), which shows cosine decay causes early plateauing 
+    for these methods while WSD allows full exploitation of the stable phase.
+
+    Schedule phases:
+        1. Warmup  : linear ramp from `init_value` → `peak_value`
+        2. Stable  : constant at `peak_value`
+        3. Decay   : cosine annealing from `peak_value` → `end_value`
+    """
+    schedules = [
+        # Phase 1: Linear warmup
+        optax.linear_schedule(
+            init_value=init_value,
+            end_value=peak_value,
+            transition_steps=warmup_steps
+        ),
+        # Phase 2: Stable (constant)
+        optax.constant_schedule(peak_value),
+        # Phase 3: Cosine decay to near-zero
+        optax.cosine_decay_schedule(
+            init_value=peak_value,
+            decay_steps=decay_steps,
+            alpha=end_value / peak_value if peak_value > 0 else 0.0
+        ),
+    ]
+    return optax.join_schedules(schedules, boundaries=[warmup_steps, warmup_steps + stable_steps])
+
+
 def create_optimizer(
     config: SIFELDMConfig
 ) -> optax.GradientTransformation:
     """
-    Create the optimizer with learning rate schedule.
-    
-    Uses AdamW with cosine decay and linear warmup.
+    Create the ANDI optimizer with a Warmup-Stable-Decay (WSD) schedule.
+
+    WSD is the optimal schedule for structural/spectral optimizers like ANDI
+    (vs. cosine, which causes premature plateau per Semenov et al., 2025).
     """
-    # Learning rate schedule using native optax implementation
-    # Note: Optax's warmup_cosine_decay_schedule expects decay_steps to be the 
-    # number of steps AFTER the warmup. So we calculate it carefully.
-    actual_warmup = min(config.warmup_steps, max(1, config.max_steps // 10))
-    actual_decay = max(1, config.max_steps - actual_warmup)
-    
-    print(f"DEBUG: max_steps={config.max_steps}, warmup={actual_warmup}, decay={actual_decay}")
-    
-    lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=1e-7,
+    total = config.max_steps
+    warmup  = min(config.warmup_steps, max(1, total // 10))
+    decay   = max(1, total // 10)          # Final ~10% of steps
+    stable  = max(1, total - warmup - decay)
+
+    print(f"DEBUG: max_steps={total}, warmup={warmup}, stable={stable}, decay={decay}")
+
+    lr_schedule = _wsd_schedule(
         peak_value=config.learning_rate,
-        warmup_steps=actual_warmup,
-        decay_steps=actual_decay,
-        end_value=config.learning_rate * 0.05 # Decay to 5% of peak
+        warmup_steps=warmup,
+        stable_steps=stable,
+        decay_steps=decay,
+        init_value=1e-7,
+        end_value=config.learning_rate * 0.01,  # Decay to 1% of peak
     )
-    
-    # Combined optimizer with clipping
+
+    # Combined optimizer: gradient clipping → ANDI (with weight decay + Nesterov inside)
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adamw(
+        andi(
             learning_rate=lr_schedule,
-            b1=0.9,
-            b2=0.99, # Slightly faster decay for noisy gradients
-            eps=1e-8,
-            weight_decay=config.weight_decay
+            b1=0.95,       # Paper recommends 0.95 for spectral-family optimizers
+            weight_decay=config.weight_decay,
+            dim_threshold=32
         )
     )
-    
+
     return optimizer
 
 
