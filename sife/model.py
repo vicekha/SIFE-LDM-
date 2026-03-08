@@ -77,7 +77,7 @@ class SIFELDMConfig(NamedTuple):
     
     # Training configuration
     batch_size: int = 8
-    learning_rate: float = 1e-4
+    learning_rate: float = 0.03   # ANDI: 0.01–0.09 (vs AdamW 1e-4)
     weight_decay: float = 0.01
     warmup_steps: int = 1000
     max_steps: int = 100000
