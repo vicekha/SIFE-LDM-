@@ -318,9 +318,10 @@ class ComplexFieldEmbedding:
         key1, key2, key3 = jax.random.split(key, 3)
         
         # Amplitude embeddings (positive values)
-        self.amplitude_embeddings = amplitude_init_scale * jnp.abs(
+        # Scaled to near-unit variance for diffusion SNR compatibility.
+        self.amplitude_embeddings = jnp.abs(
             jax.random.normal(key1, (vocab_size, embed_dim))
-        )
+        ) * 1.0  # Increased from 0.1 to 1.0 to match vision latent scale
         
         # Phase embeddings
         if phase_init == 'learned':
@@ -406,7 +407,10 @@ class PositionalEmbedding:
         self.amplitude_pos = jnp.zeros((max_seq_len, embed_dim))
         self.amplitude_pos = self.amplitude_pos.at[:, 0::2].set(jnp.sin(position * div_term))
         self.amplitude_pos = self.amplitude_pos.at[:, 1::2].set(jnp.cos(position * div_term))
-        self.amplitude_pos = jnp.abs(self.amplitude_pos) + 0.1  # Ensure positive
+        # Remove absolute and +0.1 to maintain zero-mean/unit-variance characteristics
+        # In complex field, we want the magnitude to be stable.
+        eps = 1e-6
+        self.amplitude_pos = self.amplitude_pos / jnp.sqrt(jnp.mean(self.amplitude_pos**2) + eps)
         
         # Learned phase embeddings
         key1, key2 = jax.random.split(key)

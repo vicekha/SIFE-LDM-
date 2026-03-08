@@ -233,16 +233,19 @@ def generate_from_prompt(
         key, subkey = jax.random.split(key)
         x = ddim.ddim_step(model_fn, x, int(t), int(t_prev), subkey)
         
-        # In-painting: Fix the prefix
+        # In-painting: Fix the prefix to match the current denoising noise level
         if t_prev >= 0:
-            alpha_t = diffusion.alphas_cumprod[int(t)] # Correctly use t for noise level
+            # We use t_prev because x now represents the state at the next (lower) noise level
+            alpha_prev = diffusion.alphas_cumprod[int(t_prev)]
             key, subkey1 = jax.random.split(key)
             noise = jax.random.normal(subkey1, context.shape, dtype=jnp.float32)
             noise = noise + 1j * jax.random.normal(jax.random.split(subkey1)[0], context.shape, dtype=jnp.float32)
             
-            noisy_prompt = jnp.sqrt(alpha_t) * context + jnp.sqrt(1 - alpha_t) * noise
+            # Repopulate the prefix with a noisy version of the prompt at the correct alpha level
+            noisy_prompt = jnp.sqrt(alpha_prev) * context + jnp.sqrt(1 - alpha_prev) * noise
             x = x.at[:, :prompt_len, :].set(noisy_prompt)
         else:
+            # At final t=0, set to clean context
             x = x.at[:, :prompt_len, :].set(context)
             
     # Phase 2: AGI Dynamic Deliberative Reasoning (System 2)

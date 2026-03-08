@@ -140,11 +140,15 @@ class ImageEncoder(nn.Module):
         from .unet import ComplexLinear
         h = ComplexLinear(self.features)(complex_x)
         
-        # Latent Scaling: Ensure latents have roughly unit variance for diffusion.
-        # This is critical for SNR in early training.
-        # Standard LDMs use ~0.18 (down-scaling), but since our random init is small, we scale UP.
-        # Scale 20.0 targets variance ~0.4, making the signal visible amidst variance-2.0 noise.
-        return h * 20.0
+        # Latent Scaling: Standardize to unit variance (AGI Vision Norm)
+        # We use a fixed epsilon-stable normalization to ensure the SNR 
+        # is optimal for the diffusion process across all timesteps.
+        # Removing the magic '* 20.0' in favor of variance-aware scaling.
+        eps = 1e-6
+        mean_sq = jnp.mean(jnp.abs(h)**2, axis=-1, keepdims=True)
+        h_norm = h / jnp.sqrt(mean_sq + eps)
+        
+        return h_norm
 
 
 class ImageDecoder(nn.Module):
@@ -178,7 +182,13 @@ class LabelEncoder(nn.Module):
         imag_emb = nn.Embed(self.num_classes, self.features)(labels)  # (B, features)
         # Scale imaginary part to be phase-like (small, [-pi, pi])
         imag_emb = jnp.pi * jnp.tanh(imag_emb)
-        return real_emb.astype(jnp.complex64) + 1j * imag_emb.astype(jnp.complex64)
+        
+        combined = real_emb.astype(jnp.complex64) + 1j * imag_emb.astype(jnp.complex64)
+        
+        # Ensure context latents also have unit variance for consistent CFG blending
+        eps = 1e-6
+        mean_sq = jnp.mean(jnp.abs(combined)**2, axis=-1, keepdims=True)
+        return combined / jnp.sqrt(mean_sq + eps)
 
 
 def predict_meta_physics(
