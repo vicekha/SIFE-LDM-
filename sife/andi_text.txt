@@ -1,0 +1,654 @@
+ANDI: Adaptive Norm-Distribution Interface
+Vladimer Khasia
+Independent Researcher
+vladimer.khasia.1@gmail.com
+December 13, 2025
+Abstract
+The optimization of deep neural networks is currently dominated by two paradigms: coordinate-
+wise adaptive methods (e.g., AdamW), which ignore parameter correlations, and higher-order struc-
+tural methods (e.g., K-FAC, Muon), which enforce geometric constraints but suffer from super-linear
+computational complexity. We introduce theAdaptive Norm-Distribution Interface (ANDI),
+a first-order optimizer that bridges this gap via structured preconditioning. ANDI applies an element-
+wise equilibration transformation derived from the additive equilibration of row and column norms,
+effectively approximating matrix balancing without iterative solvers or singular value decomposi-
+tion. We prove that ANDI strictly maintains descent directions and provides an implicit trust
+region bounded by the gradient energy. Empirically, ANDI matches the convergence of spectral
+methods on ResNet-9 (CIFAR-10) while maintaining theO(N) computational profile of AdamW.
+Furthermore, on Transformer-based causal language modeling (NanoGPT), ANDI outperforms both
+diagonal and spectral baselines, suggesting that additive norm-equilibration serves as a superior in-
+ductive bias for attention-based architectures. Finally, we demonstrate scalability to the8-billion
+parameter regime by fine-tuning Llama-3, where ANDI exhibits rapid convergence within the
+constrained optimization subspaces ofLow-Rank Adaptation (LoRA). The code is available at
+https://github.com/VladimerKhasia/ANDI
+1 Introduction
+Stochastic Gradient Descent (SGD) and its adaptive variants, particularly Adam [7] and AdamW [9],
+serve as the backbone of modern deep learning. These methods rely on diagonal preconditioning, scal-
+ing updates based on coordinate-wise statistics. While computationally efficient (O(N)), diagonal pre-
+conditioners treat the entries of weight matrices as independent variables, ignoring the rich structural
+correlations inherent in linear layers and attention heads.
+Recent advances in structural optimization, such as Shampoo [3] and the spectral optimizer Muon [6],
+demonstrate that respecting the matrix geometry of gradients can significantly accelerate convergence.
+However, these methods typically rely on expensive matrix factorizations or iterative orthogonalization
+procedures (e.g., Newton-Schulz iterations), which introduce cubic complexityO(n3) with respect to
+layer dimensions or substantial memory overheads.
+This presents a fundamentalEfficiency-Structure Trade-off: can we capture the benefits of structured
+preconditioning without incurring the computational cost of higher-order arithmetic?
+Present Work.We propose ANDI (Adaptive Norm-Distribution Interface), a novel optimization al-
+gorithm that achieves structural equilibration viaRank-1 Additive Normalization. Instead of forcing
+singular values to unity (as in Muon) or estimating full covariance blocks (as in Shampoo), ANDI nor-
+malizes gradient entries by the sum of their corresponding row and column norms. This operation acts
+as a single-step additive approximation to Sinkhorn scaling [13], preventing individual neurons or feature
+channels from dominating the update signal.
+Our contributions are as follows:
+1.Algorithm:We formulate ANDI, a parameter-free preconditioning step that runs inO(N) time
+andO(1) auxiliary memory, making it strictly more efficient than spectral baselines.
+2.Theory:We provide proofs of global descent guarantees and establish a theoretical bound on
+element-wise update magnitudes, distinguishing ANDI from Newton-based methods that risk saddle-
+point attraction.
+1
+3.Empirical Validation:We demonstrate that ANDI achieves Pareto-optimal performance across
+vision and language tasks, outperforming AdamW in convergence speed and exceeding the state-
+of-the-art version of Muon (D-Muon) in final loss on Transformer architectures.
+2 Methodology
+We introduce the Adaptive Norm-Distribution Interface (ANDI), a structured optimization algorithm
+designed to equilibrate the flow of gradients through high-dimensional weight matrices without destroying
+the sign structure of the descent direction. ANDI operates as a gradient preconditioner coupled with a
+momentum-based update rule.
+2.1 The ANDI Preconditioner
+LetL(θ) denote the objective function with respect to parametersθ∈Rd. At time stept, letG t=
+∇θL(θt) be the stochastic gradient. For parameters representing linear transformations (e.g., Linear or
+Convolutional layers), we reshape the gradient into a matrix formG t∈Rm×n.
+The ANDI preconditioner transformsG tinto a candidate update directionU tvia a two-stage process:
+Additive EquilibrationandEnergy-Consistent Rescaling.
+Additive Equilibration.Standard matrix balancing techniques (e.g., Sinkhorn-Knopp) seek diagonal
+matricesD 1, D2such thatD 1GD 2is doubly stochastic. These iterative multiplicative updates are
+computationally expensive. ANDI approximates this goal via a single-step additive normalization. We
+define the row normsr∈Rmand column normsc∈Rnas:
+ri=∥G i,:∥2, c j=∥G :,j∥2.(1)
+We compute the equilibrated gradient bGelement-wise:
+bGij=Gij
+ri+cj+ϵ,(2)
+whereϵis a small stability constant. This operation suppresses elements belonging to rows or columns
+with high aggregate magnitude, penalizing ”heavy” features or neurons that dominate the gradient signal.
+Energy-Consistent Rescaling.The equilibration step (2) alters the global magnitude of the update.
+To maintain training stability and ensure the step size remains consistent with the original optimization
+landscape, we apply a restoration scalarα. We define the target energyτbased on the original gradient
+norm:
+τ=q
+∥G∥2
+F+ 1.(3)
+The scalarαis computed to map the equilibrated gradient magnitude to this target:
+α=τ
+∥bG∥F+ϵ.(4)
+The final preconditioned gradient isH t=αbGt.
+2.2 Update Rule
+ANDI is integrated with Nesterov momentum. LetM tbe the momentum buffer,ηthe learning rate,
+andµthe momentum coefficient. The update step is:
+Mt+1←µM t+H t (5)
+Vt+1←H t+µM t+1 (Nesterov correction) (6)
+θt+1←θt−ηV t+1 (7)
+3 Theoretical Analysis
+In this section, we analyze the convergence properties and stability guarantees of ANDI. We define the
+transformation Φ :Rm×n→Rm×nsuch thatH= Φ(G).
+2
+3.1 Descent Direction Guarantee
+A critical requirement for any non-convex optimizer is that the update direction must maintain a positive
+correlation with the negative gradient. Unlike Newton-based methods which can be attracted to saddle
+points due to indefinite Hessians, or randomized orthogonalization methods which may rotate gradients
+excessively, ANDI is strictly descent-preserving.
+Proposition 1(Sign Preservation and Descent).For any non-zero gradientG∈Rm×n, the precondi-
+tioned directionHsatisfies⟨G,H⟩>0.
+Proof.RecallH=α bG. Expanding the inner product:
+⟨G,H⟩=X
+i,jGijHij=X
+i,jGij
+αGij
+ri+cj
+.(8)
+Sinceα >0, normsr i, cj≥0, and assumingG̸=0(implying denominators are positive):
+⟨G,H⟩=αX
+i,jG2
+ij
+ri+cj.(9)
+SinceG2
+ij≥0 for alli, jand strictly positive for at least one entry, the sum is strictly positive. Thus,H
+is a valid descent direction.
+3.2 Implicit Trust Region and Stability
+Standard adaptive methods (like Adam) bound updates by±1 (sign) or scale by moving averages. ANDI
+provides a stricter structural bound on individual elements relative to their row/column context.
+Proposition 2(Element-wise Boundedness).Let bGbe the equilibrated matrix defined in Eq. (2). For
+any entry(i, j),| bGij| ≤1. Further, ifm, n >1,| bGij|<1for generic non-sparse gradients.
+Proof.By definition,r i=pP
+kG2
+ik≥ |G ij|andc j=qP
+kG2
+kj≥ |G ij|.
+|bGij|=|Gij|
+ri+cj≤|Gij|
+|Gij|+|G ij|=1
+2.(10)
+Even in the worst case where a row and column contain only zeros except for the intersectionG ij, the
+denominator is 2|G ij|, bounding the value at 0.5. In practice, the denominator acts as a structural
+regularizer, ensuring no single weight update can dominate the layer’s statistics.
+3.3 Adaptive Regime Analysis
+The scalarαintroduces a non-linear scaling dependent on the gradient magnitude∥G∥ F. We analyze
+two limiting regimes:
+Case 1: Vanishing Gradients (∥G∥ F→0).As∥G∥ F→0,τ→1. Consequently, the update
+H≈1
+∥bG∥FbG. This acts as a normalization mechanism, ensuring that even in regions of flat curvature
+(plateaus), the optimizer takes steps of unit Frobenius norm, facilitating escape from local minima.
+Case 2: Exploding Gradients (∥G∥ F→ ∞).As∥G∥ F→ ∞,τ≈ ∥G∥ F. Assuming the structure
+ofGis stable,∥ bG∥Fconverges to a structural constantK. Thus,H≈∥G∥F
+KbG. Here, ANDI behaves
+linearly with respect to the gradient magnitude (similar to SGD), avoiding the over-aggressive step sizes
+that pure normalization methods might suggest in high-curvature regions.
+Remark 1.ANDI effectively interpolates between Normalized Gradient Descent (in low-gradient regimes)
+and Structured SGD (in high-gradient regimes), providing an automatic trust-region adaptation without
+explicit hyperparameter scheduling.
+3
+3.4 Homogeneous Embedding and Non-Vanishing Manifold Velocity
+The energy-consistent restoration scalarτ=p
+∥G∥2
+F+ 1 corresponds to a projection from the Euclidean
+gradient space onto a unit-hyperboloid manifoldHnembedded inRmn+1. Let ˜G= [vec(G); 1]∈Rmn+1
+be an augmented representation.
+The scaling byτensures that the optimizer maintains a non-zero lower bound on the update magni-
+tude, preventing the ”stagnation” typical of first-order methods in quasi-flat regions (plateaus).
+Proposition 3(Lower Bound on Update Energy).For anyG∈Rm×n, the norm of the preconditioned
+updateHsatisfies:
+∥H∥ F≥p
+∥G∥2
+F+ 1
+∥bG∥F>0.(11)
+As∥G∥ F→0, the update norm∥H∥ Fconverges to∥ bG∥−1
+F, which is strictly positive for non-degenerate
+G.
+This property implies that ANDI effectively operates asNormalized Gradient Descent(NGD) in the
+vanishing gradient limit. Unlike standard NGD, which is discontinuous at the origin, the ANDI operator
+Φ(G) is a smooth map, as the +1 term acts as aC∞regularizer for the norm function.
+3.5 Spectral Conditioning via Rank-1 Marginal Balancing
+The choice of the additive denominatorD ij=ri+cjis theoretically grounded in the minimization of
+the condition number of the weight update. It is a known result in numerical linear algebra [14] that
+diagonal scalingD 1AD 2which equilibrates row and column norms minimizes the condition numberκ
+within a factor of√nof the optimum.
+ANDI’s additive equilibration acts as a first-order approximation to the Sinkhorn-Knopp algorithm
+[2]. By the AM-GM inequality,r i+cj≥2√ricj, establishing that ANDI’s additive scaling is a strictly
+conservative majorant of the geometric mean scaling used in symmetric matrix balancing.
+Proposition 4(Spectral Homogenization).Letσ max(H)be the spectral radius of the update. The
+operatorΦacts as a contraction on the outlier singular values ofGby penalizing entries associated
+with high-energy marginalsr i, cj. This effectively homogenizes the marginal distribution of the gradient
+energy, acting as a proxy for second-order whitening without theO(n3)cost of Eigendecomposition or
+Matrix Inversion.
+3.6 Smoothness and Lipschitz Continuity of the Operator
+To guarantee convergence in stochastic settings, the preconditioning operator must be Lipschitz contin-
+uous. We define the ANDI transformation as Φ :Rm×n→Rm×n.
+Proposition 5(Lipschitz Continuity).The operatorΦ(G)is Lipschitz continuous on any compact set
+K⊂Rm×nwhere∥G∥ F>0.
+Proof.The map Φ(G) =α(G)·(G⊘D(G)) is a composition of differentiable functions. The denominator
+Dij=ri+cj+ϵis bounded away from zero byϵ. The scalarα(G) involves the Frobenius norm, which
+is differentiable everywhere except at the origin; however, the termp
+∥G∥2
+F+ 1 is differentiable for all
+G. Since the partial derivatives of Φ are bounded onK, the operator isL-Lipschitz.
+This result is fundamental for stability: it ensures that small perturbations in the stochastic gradient
+(noise) do not lead to disproportionately large jumps in the preconditioned update, a common failure
+mode in strictly interpolating or higher-order optimizers.
+4 Algorithm Specification
+We formally present the proposed method in Algorithm 1. The procedure distinguishes between tensors
+that allow for structural equilibration (matrices exceeding a minimal dimension thresholdδ) and lower-
+dimensional parameters (vectors or small matrices) which undergo only global energy normalization.
+4
+Algorithm 1:Adaptive Norm-Distribution Interface (ANDI)
+1Input:Parametersθ 0, Learning rateη, Momentumµ, Weight Decayλ, Dimension Thresholdδ,
+Stabilityϵ= 10−8.
+2Initialize:Momentum bufferM 0←0.
+3fort= 1. . . Tdo
+4Compute Gradients: G t← ∇ θL(θt−1) ;
+5foreach parameter tensorg∈G tdo
+// Step 0: Decoupled Weight Decay
+6θ[g]←(1−λη)·θ[g] ;
+// Compute norms and target energy
+7ν← ∥g∥ F;
+8τ←√
+ν2+ 1 ;
+9Let (d 1, . . . , d k) be dimensions ofg.
+10ifk >1then
+// Matricization: Flatten dims2. . . k
+11G mat←Reshape(g,(d 1,Qk
+i=2di)) ;
+12(m, n)←shape(G mat) ;
+// Check dimensions against threshold
+13ifm≥δandn≥δthen
+// Structural Equilibration
+14r← ∥G(i,:)
+mat∥2+ϵ;
+15c← ∥G(:,j)
+mat∥2+ϵ;
+// Broadcasting Addition
+16D ij←ri+cj;
+17 bg←G mat⊘D;
+// Rescale and Restore Shape
+18α←τ/(∥ bg∥F+ϵ) ;
+19g final←(α·bg).view(d 1, . . . , d k) ;
+20else
+21g final←g·(τ/(ν+ϵ)) ;
+22end
+23else
+// Global Normalization (Vectors)
+24g final←g·(τ/(ν+ϵ)) ;
+25end
+// Nesterov Momentum Update
+26m buf←M t−1[g] ;
+27m new←µ·m buf+gfinal ;
+28ifNesterovthen
+29u←g final +µ·m new;
+30else
+31u←m new;
+32end
+// Parameter Step
+33θ t[g]←θ t−1[g]−η·u;
+34M t[g]←m new;
+35end
+36end
+5 Computational Complexity and Guarantees
+We analyze the asymptotic time complexity of ANDI per optimization step relative to standard baselines
+(AdamW) and spectral methods (Muon). LetW∈Rm×ndenote a weight matrix parameter. Let
+N=m×nbe the total number of elements.
+5
+5.1 ANDI Complexity
+The computational cost of ANDI is dominated by the calculation of row and column norms and the
+element-wise division.
+1.Norm Reduction:Calculatingrrequires summing squares along rows, a reduction operation of
+O(N). Similarly, calculatingcisO(N).
+2.Broadcasting and Division:ComputingD ij=ri+cjand the subsequent divisionG ij/Dij
+involvesO(1) operations per element, totalingO(N).
+3.Global Scaling:Frobenius norms and scalar multiplications areO(N).
+Thus, the total time complexity per step is:
+TANDI∈ O(N) =O(mn).(12)
+Crucially, ANDI relies only on element-wise and reduction operations, making it **memory-bandwidth
+bound** rather than compute bound, similar to SGD.
+5.2 Baseline Comparisons
+AdamW.AdamW maintains two moment estimates (mean and variance). It performs element-wise
+squaring, square roots, and division.
+TAdamW ∈ O(N).(13)
+ANDI shares the same linear asymptotic complexity class as AdamW. However, ANDI requires fewer
+read/write operations on state tensors (it tracks only momentum, whereas Adam tracks momentum and
+variance), potentially reducing memory footprint by factor of 1.5×relative to Adam.
+Muon (Newton-Schulz).Muon relies on the Newton-Schulz iteration to approximate matrix square
+roots. For a matrixG∈Rm×n(assumingm≤n), the dominant operation is Matrix-Matrix Multiplica-
+tion (MMM). The standard Newton-Schulz iteration involves computingA=XXTandBX, which are
+operations of orderO(m2n). IfKis the number of Newton-Schulz steps (typicallyK= 5):
+TMuon∈ O(K·m2n).(14)
+In the case of square matrices wherem≈n, Muon exhibits cubic complexityO(n3), whereas ANDI
+remains quadraticO(n2) (linear in the number of parameters).
+5.3 Summary of Guarantees
+Table 1 summarizes the theoretical properties. ANDI occupies a distinct pareto-optimal point: it offers
+structured preconditioning (utilizing the matrix geometry) while maintaining theO(N) cost profile of
+coordinate-wise methods.
+Table 1: Comparison of Optimization Algorithms per Step
+Algorithm Complexity Preconditioning State Memory
+SGDO(N) None 1×(Momentum)
+AdamWO(N) Diagonal (Coordinate-wise) 2×(Mom + Var)
+MuonO(Km2n) Spectral (SVD-approx) 1×(Momentum)
+ANDI (Ours)O(N)Rank-1 Additive 1×(Momentum)
+5.4 Theoretical Analysis: Additive Energy Equilibration
+The empirical efficacy of ANDI stems from its ability to approximate the geometric benefits of ma-
+trix balancing and spectral preconditioning without incurring theirO(n3) computational costs. In this
+6
+section, we analyze the algebraic properties of the equilibration operator Φ :Rm×n→Rm×n, defined
+element-wise as:
+Φ(G) ij=Gij
+∥Gi,:∥2+∥G :,j∥2+ϵ.(15)
+We establish that this operator acts as a conservative structural regularizer that mitigates the hubness
+phenomenon and homogenizes the spectral landscape.
+5.4.1 Majorization of Geometric Balancing
+Standard matrix equilibration techniques, such as the Ruiz algorithm [11] or Sinkhorn-Knopp [13],
+typically seek to normalize a matrixGvia diagonal scaling matricesD 1,D2. A single step of sym-
+metric geometric balancing transforms an entryG ijby the geometric mean of its marginal norms:
+Ggeo
+ij=G ij(∥G i,:∥2∥G:,j∥2)−1/2.
+ANDI employs an additive denominator. We show that this formulation imposes a strictly conserva-
+tive trust region relative to geometric scaling.
+Proposition 6(Conservative Regularization Bound).Letr i=∥G i,:∥2andc j=∥G :,j∥2. For any
+entry with non-zero marginals, the update magnitude of ANDI is bounded by half the magnitude of the
+geometric equilibration step.
+Proof.By the Inequality of Arithmetic and Geometric Means (AM-GM), for real non-negativer i, cj:
+ri+cj
+2≥√ricj.(16)
+Equality holds if and only ifr i=cj. Taking the reciprocal reverses the inequality:
+1
+ri+cj≤1
+2√ricj.(17)
+Multiplying both sides by the gradient magnitude|G ij|yields:
+|Φ(G) ij| ≤1
+2Gij√ricj=1
+2|Ggeo
+ij|.(18)
+Remark 2.Implication for Non-Convex Optimization:The factor1
+2acts as a geometric dampen-
+ing coefficient on the local curvature. Crucially, this constant scaling is absorbed by the energy restoration
+scalarα(Eq. 4) and does not suppress the global effective learning rate. Instead, it modifies the rel-
+ative shape of the update: ANDI enforces a tighter local trust region specifically when row and column
+norms are imbalanced (r i̸=cj), favoring stability over the aggressive orthogonalization typical of spectral
+methods.
+5.4.2 Asymptotic Suppression of Gradient Hubs
+High-dimensional optimization is frequently degraded by theHubness Phenomenon[10], where specific
+neurons (rows) or attention heads accumulate disproportionately high gradient norms. We prove that
+ANDI asymptotically saturates the update norm for such outliers, effectively acting as a soft-clipping
+mechanism.
+Proposition 7(Asymptotic Row-Norm Saturation).Consider a gradient matrixGwhere a specific
+rowkdominates the local geometry such thatr k→ ∞while column normsc jremain bounded by some
+constantC. The Euclidean norm of the updated row vector bgk= Φ(G) k,:converges to unity from below.
+Proof.Thej-th entry of the updated row is bGkj=Gkj
+rk+cj. The squared Euclidean norm of the updated
+row is:
+∥bgk∥2
+2=nX
+j=1Gkj
+rk+cj2
+.(19)
+In the limitr k→ ∞, the termc jin the denominator becomes negligible relative tor k:
+lim
+rk→∞∥bgk∥2
+2= lim
+rk→∞nX
+j=1G2
+kj
+r2
+k=1
+r2
+knX
+j=1G2
+kj.(20)
+7
+Substituting the definitionr2
+k=Pn
+j=1G2
+kj, we obtain:
+lim
+rk→∞∥bgk∥2
+2=r2
+k
+r2
+k= 1.(21)
+Sincec j≥0, the denominatorr k+cj≥rk, implying∥ bgk∥2≤1 for all finiter k, cj.
+Remark 3.This property ensures that no single feature dimension can dominate the update step, strictly
+preventing the ”exploding gradient” problem at the granularity of individual rows/columns. This provides
+a theoretical justification for ANDI’s superior performance on Transformer architectures (Sec. 6), which
+are sensitive to scale variations in residual streams.
+5.4.3 Conditioning via Marginal Homogenization
+While ANDI does not explicitly enforce orthogonality, it acts as a computationally efficient proxy for
+spectral preconditioning by homogenizing the marginal distributions of the gradient matrix.
+Van der Sluis [14] established that for any matrixA, minimizing the condition numberκ(D 1AD 2) is
+closely related to balancing the row and column norms. Specifically, scaling a matrix such that all row
+and column norms are equal brings the condition number within a factor of√nof the optimal diagonal
+scaling.
+ANDI penalizes entriesG ijwhere the aggregate marginalr i+cjis large. This operation inherently
+reduces the variance between the effective row and column norms of the update bG. By driving the
+optimization trajectory through a sequence of updates with homogenized marginals, ANDI implicitly
+smooths the spectral condition number of the effective step, facilitating faster convergence along high-
+curvature directions without theO(n3) cost of Singular Value Decomposition.
+6 Experiments
+To empirically validate the theoretical properties of ANDI, we evaluate the optimizer across four dis-
+tinct modalities: non-convex dimensionality reduction (AUTOENCODER), computer vision (RESNET),
+causal language modeling (GPT), and large-scale instruction fine-tuning (LLAMA).
+6.1 Experimental Setup
+Following the rigorous benchmarking protocols established by Semenov et al. [12], we compare ANDI
+against two primary baselines:
+1.AdamW[9]: The standard diagonal preconditioner. We utilize a Cosine learning rate schedule,
+which is the community standard for coordinate-wise methods.
+2.Dispersed Muon (D-Muon)[8, 12]: A state-of-the-art spectral optimizer. Unlike the origi-
+nal Muon, D-Muon applies Newton-Schulz orthogonalization only to 2D tensors while using an
+AdamW backend for vectors, alongside decoupled weight decay. We utilize the Warmup-Stable-
+Decay (WSD) scheduler, as Muon-based methods have been shown to underperform with standard
+cosine decay [12].
+Methodology.Experiments were conducted on a single NVIDIA GPU. We reportValidation
+Lossas the primary metric to assess generalization. To quantify computational overhead, we report
+Wall-Clock Time. Hyperparameters were tuned via grid search for ANDI and both baselines. Detailed
+configurations are provided in Appendix A.
+6.2 Task 1: Causal Language Modeling (GPT)
+We train a NanoGPT transformer [15] on the TinyShakespeare corpus.
+Results.As summarized in Table 2, ANDI (η= 0.09) achieves the best performance, reaching a
+validation loss of1.535, strictly outperforming D-Muon (1.555) and AdamW (1.577). Computationally,
+ANDI remains efficient. The total wall-clock time for ANDI (108s) is comparable to AdamW (103s),
+whereas D-Muon incurs a∼23% overhead (127s) due to theO(N3) cost of Newton-Schulz iterations.
+This suggests ANDI’s row-column normalization approximates the geometric benefits of spectral methods
+for Attention layers without the cubic computational cost.
+8
+6.3 Task 2: High-Curvature Landscapes (AUTOENCODER)
+We utilize a Deep Autoencoder on FashionMNIST. This task tests robustness in ill-conditioned land-
+scapes.
+Results.D-Muon achieves the lowest reconstruction error (0.011), confirming that exact orthogo-
+nalization is highly effective for deep bottleneck architectures. However, ANDI (η= 0.09) demonstrates
+superior robustness compared to diagonal methods, achieving a validation loss of 0.015 versus AdamW’s
+0.019. While D-Muon wins on pure performance, ANDI bridges the gap between diagonal and spectral
+methods, offering significantly better convergence than AdamW with lower computational cost than
+Muon.
+6.4 Task 3: Convolutional Generalization (RESNET)
+We train a ResNet-9 on CIFAR-10 to evaluate performance on convolutional topologies.
+Results.D-Muon dominates this task (Val Loss 0.277), followed by AdamW (0.338). ANDI trails
+closely with a loss of 0.358.
+Table 2:Benchmarking Summary.Best validation loss (lower is better) and total wall-clock time.
+ANDI achieves SOTA performance on Transformers (GPT) with minimal overhead compared to AdamW.
+GPT Autoencoder ResNet
+Optimizer Val Loss Time (s) Val Loss Time (s) Val Loss Time (s)
+AdamW 1.577103 0.019972 0.338245
+D-Muon 1.555 127 0.011281 0.277321
+ANDI (Ours) 1.535108 0.0156 74 0.358 255
+6.5 Task 4: Instruction Fine-Tuning (LLAMA)
+We fine-tune a quantized Llama-3 8B model [?] on the Alpaca-GPT4 dataset using Low-Rank Adaptation
+(LoRA) [5] (r= 16, α= 16). This setting explicitly tests optimization in constrained, rectangular
+subspaces (∆W∈Rd×r).
+Results.Figure 2 demonstrates the ”Fast-Start” phenomenon of ANDI.
+•Convergence Speed:ANDI (η= 5e-2) rapidly reduces loss, achieving a validation loss of∼1.6
+within 60 steps. AdamW (η= 1e-3) stagnates early, remaining above 2.0 loss for the first 100
+steps.
+•Subspace Equilibration:While D-Muon (η= 0.02) performs well, it converges slower than
+ANDI in the initial phase. We hypothesize that Muon’s strict orthogonality constraint is overly
+restrictive for the rectangular geometry of LoRA adapters (4096×16). ANDI’s additive normal-
+ization naturally balances the disparate scales of the high-dimension input and low-dimension rank
+without forcing rotational invariance, leading to faster adaptation.
+7 Discussion
+The experimental results presented in Section 6 highlight distinct behaviors of ANDI relative to the
+baselines. Here, we interpret these findings through the lens of our theoretical framework.
+7.1 Inductive Bias in Transformers
+The most significant result is the superior performance of ANDI on the GPT task (Figure 1, Left).
+We hypothesize this is due to the specific structure of Transformer weights. In Self-Attention, rows
+and columns correspond to specific embedding features or heads. If a specific feature dimension has
+high variance, it dominates the LayerNorm statistics. AdamW exacerbates this by normalizing based on
+historical variance, potentially stalling the learning of that feature. ANDI, utilizing instantaneous spatial
+norms, enforces an equilibrium where all feature dimensions contribute more equally to the update step.
+This aligns well with the ”feature competition” dynamic often observed in Transformer training [15].
+9
+Figure 1:Optimization Trajectories (Tasks 1-3).Training loss, Validation loss, and Gradient
+Norm evolution. ANDI (Red) demonstrates superior convergence on GPT, outperforming both D-Muon
+(Orange) and AdamW (Blue). On Autoencoder, ANDI significantly outperforms AdamW, bridging the
+gap to the computationally expensive D-Muon.
+Figure 2:Llama-3 8B Fine-Tuning (LoRA).Training (Left) and Validation (Right) loss. ANDI (Red)
+dominates the optimization trajectory, exhibiting a ”fast-start” behavior that significantly outpaces
+AdamW (Blue) and converges faster than D-Muon (Orange) in the low-rank regime.
+ANDI slightly outperforms D-Muon on the GPT pre-training task (Figure 1, Left) and Llama-3 8B
+fine-tuning (LoRA) task (Figure 2). D-Muon operates by orthogonalizing the gradient update, which
+effectively equilibrates the spectrum of the weight update. ANDI achieves a similar effect through row-
+10
+column normalization. By dividingG ijby∥g i,:∥+∥g :,j∥, ANDI penalizes updates in directions where the
+aggregate gradient mass is high. This creates a ”pseudo-whitening” effect. The first-order approximation
+provided by ANDI captures the majority of the structural benefit at a fraction of the compute cost.
+7.2 Stability vs. Aggressiveness
+In the AUTOENCODER task, Muon exhibited rapid initial descent followed by stagnation. Spectral
+methods are known to be ”aggressive”—they project gradients onto the Stiefel manifold, which can be
+suboptimal in landscapes requiring fine-grained magnitude adjustments (like MSE loss). ANDI’s energy-
+consistent scaling (Equation 4) allowed it to interpolate between the structural regime (early training)
+and the magnitude-sensitive regime (fine-tuning), preventing the premature plateauing observed in D-
+Muon.
+7.3 Limitations
+While ANDI achieves spectral efficiency, the current formulation entails specific structural constraints
+and approximations:
+1.Regime Heterogeneity:The proposed equilibration operator relies on the existence of orthogonal
+tensor modes to estimate local curvature. For parameters with dimensiond <2 (biases, gains)
+or matrices falling below the thresholdδ, ANDI reverts to global energy normalization. In this
+regime, the algorithm approximates the dynamics ofNormalized Gradient Descent, foregoing the
+element-wise equilibration benefits. Consequently, the structural advantages of ANDI are primarily
+realized in ”wide” layers (Linear, Conv2d, Attention), while vector parameters do not benefit from
+coordinate-aware preconditioning.
+2.Spatial Homogenization via Matricization:For higher-order tensors, such as convolutional
+kernelsK ∈RCout×Cin×H×W, ANDI applies a matricization step to reshape the tensor into
+RCout×(CinHW). While this efficiently captures correlations between output filters, it treats spatial
+dimensions and input channels uniformly. This approximation ignores the local inductive bias of
+the convolution operator, potentially under-utilizing the specific spatial geometry of the kernel.
+3.Discrete Structural Transition:A minimal dimensionalityδis required to compute statisti-
+cally meaningful marginal norms. This imposes a discrete decision boundary where the optimizer
+switches between coordinate-wise equilibration (for large matrices) and global spherical constraints
+(for small tensors).
+7.4 Broader Theoretical Implications: Additive Equilibration as a Primitive
+While derived within the context of non-convex optimization, the core operator of ANDI—Rank-1 Ad-
+ditive Equilibration—possesses algebraic properties that render it a tractable primitive for domains re-
+quiring structural regularization. We define the general operator Φ(X) on a matrixX∈Rm×nwith row
+normsrand column normscas:
+Φ(X) ij=Xij
+ri+cj+ϵ.(22)
+We identify three regimes where this transformation offers a geometric advantage over standard baselines.
+Batch-wise Density Normalization in Retrieval.In dense retrieval, theHubness Phenomenon[10]
+degrades performance when high-density vectors (”hubs”) appear as nearest neighbors to a dispropor-
+tionately large number of queries. Standard cosine similarity normalization fails to account for global
+density variations. Consider a batch similarity matrixS∈RB×NwhereB >1. The column norm∥S :,j∥2
+serves as a local proxy for the density of thej-th database item relative to the query batch. Applying
+ANDI yields a re-scored matrix bS:
+bSij=Sij
+∥Si,:∥2+∥S :,j∥2.(23)
+By explicitly incorporating the column energy, ANDI penalizes ”hub” items that possess high aggregate
+similarity across the batch. Unlike CSLS [1], which requires expensive k-NN search for density estima-
+tion, ANDI achieves structural suppression inO(BN) (linear in the similarity matrix size), efficiently
+sharpening the retrieval distribution around semantically unique correspondences.
+11
+Soft Redundancy Suppression in Representation Learning.Standard objectives for feature
+decorrelation (e.g., in self-supervised learning) often rely on Pearson correlation, which normalizes co-
+variance entries via the geometric mean of variances:ρ ij=C ij/p
+CiiCjj. ANDI implies a stricter
+regularization scheme. By the AM-GM inequality, the arithmetic mean of structural norms dominates
+the geometric mean:r i+cj≥2√ricj. When applied to a feature covariance matrixC, ANDI acts as a
+Soft Redundancy Suppressionoperator. Because the row normr i=∥C i,:∥2captures the total correlation
+energy of featureiwith all other dimensions (not just its own variance), ANDI naturally down-weights
+features that are redundant (i.e., highly correlated with the global set). This serves as anO(N2) proxy
+for feature selection, discouraging representational collapse without the computational cost of whitening
+(ZCA).
+One-Shot Structural Balancing for Graph Matching.The Sinkhorn-Knopp algorithm [2] solves
+entropic optimal transport by iteratively projecting a matrix onto the Birkhoff polytope (doubly stochas-
+tic matrices). ANDI functions as a closed-form, one-shot approximation of this balancing objective.
+While it does not enforce strict mass conservation (PP= 1), it enforces element-wise boundedness
+(as proven in Proposition 2). In Deep Graph Matching, where the goal is robust node correspondence,
+the raw similarity matrix is often dominated by outliers. ANDI equilibrates the energy distribution
+of the matrix, mapping values to a bounded range while penalizing nodes with disproportionately high
+matching degrees. This provides a conditioned initialization for matching layers, capturing the structural
+benefits of Sinkhorn scaling without the latency of iterative solvers.
+8 Conclusion
+We presented ANDI, an algorithm designed to democratize efficient optimization in deep learning. By
+replacing expensive spectral decompositions with row-column additive normalization, ANDI successfully
+navigates the trade-off between computational efficiency and geometric awareness.
+Our theoretical analysis confirmed that ANDI preserves descent directions and bounds update mag-
+nitudes, ensuring robust stability. Empirically, ANDI demonstrated state-of-the-art convergence rates on
+non-convex vision and language modeling benchmarks, proving particularly effective for Transformers.
+These results suggest that the heavy machinery of second-order or spectral optimization is not always
+necessary; simple, algebraically sound equilibration of gradient matrices can yield equivalent gains with
+the efficiency of standard first-order methods. Future work will investigate the application of ANDI
+to distributed training setups, where its low memory footprint and lack of collective communication
+overheads could offer significant wall-clock speedups.
+A Experimental Methodology and Implementation Details
+To ensure a rigorous evaluation of the ANDI optimizer, we aligned our experimental protocol with the
+comprehensive benchmarking standards recently established by Semenov et al. [12]. Their work high-
+lights critical flaws in common optimizer comparisons—specifically regarding weight decay application
+in spectral methods and the coupling of learning rate schedules to specific optimizer families. Below, we
+detail how these recommendations were translated into our implementation.
+A.1 Optimizer Selection: Dispersed Muon (D-Muon)
+For the spectral baseline, we utilize theDispersed Muon (D-Muon)algorithm rather than the original
+Muon implementation.
+•Rationale:As demonstrated in Section A.3 and Figures 4 & 8 of [12], the original Muon optimizer
+suffers in extended training regimes because it fails to apply weight decay to 2D matrix parameters.
+D-Muon corrects this by applying decoupled weight decay to all parameter groups prior to the
+update step.
+•Implementation:Our code applies Newton-Schulz orthogonalization only to tensors with dimen-
+sions>32×32 (Linear and Conv2d layers), falling back to an AdamW-style backend for vector
+parameters (biases, normalization scales). This hybrid approach is consistent with the ”Dispersed”
+methodology required to maintain stability (Takeaway 3 in [12]).
+12
+•Newton-Schulz Iterations:We fix the number of orthogonalization steps atN NS= 5. Semenov
+et al. (Figure 37) show that increasing iterations beyond 5 yields diminishing returns in convergence
+while incurring unnecessary wall-clock overhead.
+•Momentum:We utilize momentum withβ= 0.95. Extensive hyperparameter tuning on Llama
+architectures (Tables 40-41 in [12]) identifies 0.95 as consistently superior to the standard 0.9 or
+0.99 for Muon-based methods.
+A.2 Learning Rate Schedulers
+We strictly adhere to the finding that different optimizer classes require distinct learning rate schedules
+to achieve optimal performance (Takeaway 6 in [12]).
+•Coordinate-wise Methods (AdamW):We utilize aCosine Decayschedule. Benchmarks
+(Figure 11c [12]) show that AdamW consistently outperforms other schedules (linear or WSD)
+under cosine decay.
+•Spectral Methods (D-Muon) and ANDI:We utilize aWarmup-Stable-Decay (WSD)
+schedule. Semenov et al. demonstrate that spectral methods exhibit a unique preference for WSD
+(Figure 11a), often plateauing early with standard cosine annealing. Consequently, using Cosine for
+AdamW and WSD for ANDI/D-Muon represents the fairest comparison, allowing each optimizer
+to operate under its ideal conditions.
+A.3 Evaluation Metrics
+Validation Loss vs. Training Loss.Following the reporting standards urged in [12] (Figure 1 &
+Takeaway 12), we reportFinal Validation Lossas the primary metric. Training loss is frequently
+misleading in optimizer benchmarks due to varying degrees of overfitting and regularization handling
+(e.g., weight decay impacts training loss values differently across optimizers).
+Wall-Clock Time.Step count is an insufficient metric for spectral methods due to the computational
+overhead of matrix operations. As noted in Appendix D.3 and Figure 18 of [12], methods like SOAP or
+Muon can suffer from slowdowns as model size increases. We report total wall-clock time to quantify the
+trade-off between convergence speed (per step) and computational throughput.
+A.4 Hyperparameter Search and Configuration
+While we adopt the architectural hyperparameters suggested by the references, we performed an inde-
+pendent robust search for learning rates to accommodate the specific scale of our proxy tasks.
+•Search Space:We performed a logarithmic grid search for learning rates:η∈ {1e-3, . . . ,2e-4}
+for AdamW andη∈ {0.09, . . . ,0.009}for ANDI and D-Muon.
+•Weight Decay:Fixed atλ= 0.01 for all methods. While Semenov et al. explore values up to
+0.1, we selected 0.01 to ensure consistent regularization strength across the diverse architectures
+(ResNet vs. Transformer) in our suite.
+•Gradient Clipping:
+–Tasks 1-3 (Proxy Benchmarks):We monitored gradient norms but did not enforce clipping
+(infinite threshold) to observe the raw optimization trajectory and stability of the updates.
+–Task 4 (LLAMA Fine-tuning):We applied standard gradient clipping (norm 1.0) via the
+Unsloth framework [4]. This aligns with findings (Takeaway 17 in [12]) that clipping is crucial
+for stability in lower-precision (4-bit/bfloat16) regimes involving large rectangular matrices.
+A.5 Hardware and Environment
+All benchmarks were executed on a single NVIDIA Tesla T4 (16GB) available in the free tier of Google
+Colab. The Llama-3 fine-tuning was performed using 4-bit quantization via the Unsloth framework to
+fit within memory constraints. Seeds 42 and 1337 were used for reproducibility.
+13
+References
+[1] Alexis Conneau, Guillaume Lample, Marc’Aurelio Ranzato, Ludovic Denoyer, and Herv’e J’egou.
+Word translation without parallel data.ArXiv, abs/1710.04087, 2017.
+[2] Marco Cuturi. Sinkhorn distances: Lightspeed computation of optimal transport. InNeural Infor-
+mation Processing Systems, 2013.
+[3] Vineet Gupta, Tomer Koren, and Yoram Singer. Shampoo: Preconditioned stochastic tensor opti-
+mization. InInternational Conference on Machine Learning, 2018.
+[4] Daniel Han and Unsloth Team. Unsloth.https://github.com/unslothai/unsloth, 2023. Ac-
+cessed: 2025.
+[5] J. Edward Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, and Weizhu
+Chen. Lora: Low-rank adaptation of large language models.ArXiv, abs/2106.09685, 2021.
+[6] Keller Jordan, Yuchen Jin, Vlado Boza, You Jiacheng, Franz Cesista, Laker Newhouse, and Jeremy
+Bernstein. Muon: An optimizer for hidden layers in neural networks, 2024.
+[7] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization.CoRR,
+abs/1412.6980, 2014.
+[8] Jingyuan Liu, Jianling Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin,
+Weixin Xu, Enzhe Lu, Junjie Yan, Yanru Chen, Huabin Zheng, Yibo Liu, Shaowei Liu, Bohong
+Yin, Weiran He, Han Zhu, Yuzhi Wang, Jianzhou Wang, Meng Dong, Zheng Zhang, Yongsheng
+Kang, Hao Zhang, Xinran Xu, Yutao Zhang, Yuxin Wu, Xinyu Zhou, and Zhilin Yang. Muon is
+scalable for llm training, 2025.
+[9] Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. InInternational Confer-
+ence on Learning Representations, 2017.
+[10] Miloˇ s Radovanovi´ c, Alexandros Nanopoulos, and Mirjana Ivanovi´ c. Hubs in space: Popular nearest
+neighbors in high-dimensional data.J. Mach. Learn. Res., 11:2487–2531, 2010.
+[11] Daniel Ruiz. A scaling algorithm to equilibrate both row and column norms in matrices. Technical
+Report RAL-TR-2001-034, Rutherford Appleton Laboratory, Oxon, UK, 2001.
+[12] Andrei Semenov, Matteo Pagliardini, and Martin Jaggi. Benchmarking optimizers for large language
+model pretraining.ArXiv, abs/2509.01440, 2025.
+[13] Richard Sinkhorn. A relationship between arbitrary positive matrices and doubly stochastic matri-
+ces.Annals of Mathematical Statistics, 35:876–879, 1964.
+[14] A. van der Sluis. Condition numbers and equilibration of matrices.Numerische Mathematik,
+14(1):14–23, 1969.
+[15] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez,
+Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. InNeural Information Processing
+Systems, 2017.
+14
