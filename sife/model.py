@@ -191,7 +191,7 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         tokens = batch['tokens']
         mask = batch['mask'] # Assume binary mask provided
         B = tokens.shape[0]
-        t = jnp.zeros((B,)) # Timesteps unused for text but required by signature
+        t = jnp.zeros((B,), dtype=jnp.int32) # Timesteps unused for text but required by signature
         
         x0 = model.apply({'params': params}, tokens, mask=mask, method=model.encode_text)
         
@@ -199,20 +199,17 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         pred_x0 = model.apply({'params': params}, x0, t, mode='text', deterministic=False, rngs={'dropout': dropout_rng})
         logits = model.apply({'params': params}, pred_x0, method=model.decode_symbol)
         
-        # CrossEntropy on masked positions
-        one_hot = jax.nn.one_hot(tokens, config.vocab_size)
-        # FIX: Force real type on CE loss
-        ce_loss = jnp.real(optax.softmax_cross_entropy(logits, one_hot))
-        # FIX: Correct mask logic—optimize on real tokens (~mask), not padding (mask)
-        valid_mask = ~mask
-        denom = jnp.maximum(jnp.sum(valid_mask), 1.0)
-        loss = jnp.sum(ce_loss * valid_mask) / denom
+        # --- NUMERICALLY STABLE LOSS ---
+        # valid positions are where mask == False
+        valid_mask = (~mask).astype(jnp.float32)   # shape (B, L)
+        # clip logits to avoid overflow in softmax
+        logits = jnp.clip(logits, -1e4, 1e4)
+        # cross-entropy with integer labels (no one-hot, no float-point surprises)
+        ce_loss = optax.softmax_cross_entropy_with_integer_labels(logits, tokens)
+        total_ce = jnp.sum(ce_loss * valid_mask)
+        num_valid = jnp.maximum(jnp.sum(valid_mask), 1.0)
+        loss = total_ce / num_valid
         
-        field = SIFField(
-            amplitude=jnp.abs(pred_x0), phase=jnp.angle(pred_x0), fluctuation=jnp.angle(pred_x0),
-            velocity_amp=jnp.zeros_like(pred_x0.real), velocity_phi=jnp.zeros_like(pred_x0.real)
-        )
-        # FIX: Force real type on Hamiltonian loss
-        phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
-        loss = loss + 0.0001 * jnp.mean(phys_loss)
+        # NOTE: Physics loss is removed for text as masked discrete diffusion 
+        # handles its own discrete topology without continuous Hamiltonian guidance.
         return loss.real
