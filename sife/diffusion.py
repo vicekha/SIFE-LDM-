@@ -137,6 +137,22 @@ class MaskedDiffusion:
         
         return pred_ids, top_indices
 
+    def unmask_step_autoregressive(self, current_x: jnp.ndarray, logits: jnp.ndarray, step_idx: int, unk_id: int = 1, pad_id: int = 0) -> jnp.ndarray:
+        """
+        Cognitive Phase 3: Autoregressive Unmasking.
+        Instead of top-K confidence everywhere, we commit to token step_idx before moving forward.
+        """
+        # Hard-ban UNK and PAD
+        banned_mask = jnp.zeros(logits.shape[-1])
+        banned_mask = banned_mask.at[unk_id].set(1e9)
+        banned_mask = banned_mask.at[pad_id].set(1e9)
+        
+        target_logits = logits[:, step_idx, :] - banned_mask[None, :]
+        
+        # Greedy selection for conversational stability
+        pred_ids = jnp.argmax(target_logits, axis=-1)
+        return pred_ids
+
 class SIFEDiffusion:
     def __init__(self, diffusion: GaussianDiffusion, hamiltonian_fn: Callable, guidance_scale: float = 0.1):
         self.diffusion = diffusion

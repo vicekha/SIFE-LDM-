@@ -202,5 +202,24 @@ def compute_hamiltonian(field: SIFField, config: SIFEConfig) -> Array:
     
     return T + V_grad + V_dw + V_truth + V_cent
 
+@jit
+def update_context_field(ctx_psi: Array, config: SIFEConfig, dt: float = 0.1) -> Array:
+    """
+    Cognitive Phase 3: Persistent Context Field Evolution.
+    Evolves the working memory psi field using SIFE physics.
+    """
+    # Convert context complex vector to SIFField
+    field = SIFField(
+        amplitude=jnp.abs(ctx_psi),
+        phase=jnp.angle(ctx_psi),
+        fluctuation=jnp.angle(ctx_psi),
+        velocity_amp=jnp.zeros_like(ctx_psi.real),
+        velocity_phi=jnp.zeros_like(ctx_psi.real)
+    )
+    
+    # Evolve via physics
+    new_field = leapfrog_step(field, config, dt=dt)
+    return new_field.complex_field
+
 batch_initialize_field = vmap(initialize_field, in_axes=(0, None, None))
 batch_compute_hamiltonian = vmap(compute_hamiltonian, in_axes=(0, None))

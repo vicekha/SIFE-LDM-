@@ -152,6 +152,26 @@ class SIFELDM(nn.Module):
     def decode_symbol(self, x):
         return self.symbol_decoder(x)
 
+def contrastive_phase_loss(text_complex, vision_complex, temperature=0.07):
+    # Global average pooling to get 1D phase vector per sample
+    # text_complex: (B, L, D), vision_complex: (B, L, D)
+    text_phase = jnp.angle(jnp.mean(text_complex, axis=1))   # Shape: (B, D)
+    vision_phase = jnp.angle(jnp.mean(vision_complex, axis=1)) # Shape: (B, D)
+    
+    # Use mean across dim to get global representation
+    text_global = jnp.mean(text_phase, axis=-1)   # (B,)
+    vision_global = jnp.mean(vision_phase, axis=-1) # (B,)
+
+    # Phase difference matrix (B, B)
+    phase_diff = text_global[:, None] - vision_global[None, :]
+    similarity = jnp.cos(phase_diff) / temperature
+    
+    # Symmetric InfoNCE loss (CLIP-style but in phase space)
+    labels = jnp.arange(similarity.shape[0])
+    loss_t2v = jnp.mean(optax.softmax_cross_entropy_with_integer_labels(similarity, labels))
+    loss_v2t = jnp.mean(optax.softmax_cross_entropy_with_integer_labels(similarity.T, labels))
+    return (loss_t2v + loss_v2t) / 2
+
 def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
     if mode == 'vision':
         images = batch['image']
@@ -258,3 +278,48 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         jax.debug.callback(nan_check, loss)
         
         return loss.real
+
+    elif mode == 'multimodal':
+        # --- PHASE 2: Interleaved Generative Pre-training ---
+        tokens = batch['tokens']
+        images = batch['image']
+        txt_mask = batch['mask']
+        B = tokens.shape[0]
+        
+        # 1. Encode both modalities to complex latents
+        x0_txt = model.apply({'params': params}, tokens, mask=txt_mask, method=model.encode_text)
+        x0_img_raw = model.apply({'params': params}, images, method=model.encode_image)
+        x0_img = model.apply({'params': params}, x0_img_raw, method=model.encode_patch)
+        
+        # 2. Interleave into one sequence for Unified Transformer
+        # x0_txt: (B, L_t, D), x0_img: (B, L_i, D)
+        x0_combined = jnp.concatenate([x0_txt, x0_img], axis=1)
+        
+        # 3. Add Contrastive Phase Alignment Loss (Phase 1)
+        # This forces the word "dog" and dog pixels to settle into the same phase basin.
+        align_loss = contrastive_phase_loss(x0_txt, x0_img)
+        
+        # 4. Multimodal Denoising/Masking logic
+        t = jax.random.randint(rng, (B,), 0, diffusion_obj.timesteps)
+        
+        # Simplify: Train on Vision denoising conditioned on Text
+        rng, dropout_rng = jax.random.split(rng)
+        
+        # Use Text as context for Vision Denoising
+        pred_combined = model.apply({'params': params}, x0_combined, t, 
+                                    context=x0_txt, 
+                                    mode='vision', 
+                                    deterministic=False, rngs={'dropout': dropout_rng})
+        
+        # 5. Dual Loss Construction
+        v_loss = jnp.mean(jnp.abs(pred_combined[:, x0_txt.shape[1]:] - x0_img)**2)
+        
+        total_loss = v_loss + 0.1 * align_loss
+        
+        # Sanity check
+        def nan_check(l):
+            if jnp.isnan(l):
+                print(f"!!! NaN MULTIMODAL LOSS DETECTED !!!")
+        jax.debug.callback(nan_check, total_loss)
+        
+        return total_loss.real
