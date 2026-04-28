@@ -43,6 +43,7 @@ def true_decoupled_weight_decay(weight_decay: float) -> optax.GradientTransforma
 
 def andi(learning_rate: float, b1: float = 0.9, weight_decay: float = 1e-4) -> optax.GradientTransformation:
     return optax.chain(
+        optax.clip_by_global_norm(1.0), # SAFETY: Hard cap on global norm to prevent NaN spikes
         scale_by_andi(),
         optax.trace(decay=b1, nesterov=True),
         true_decoupled_weight_decay(weight_decay),

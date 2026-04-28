@@ -164,29 +164,18 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         noise_theta = jax.random.normal(k2, x0.shape)
         noise = noise_A + 1j * noise_theta
         
-        x_t = diffusion_obj.q_sample(x0, t, noise)
-        
         # FIX: Normalize complex latent to unit variance for stable diffusion
         mean_sq = jnp.mean(jnp.abs(x0)**2)
         x0 = x0 / jnp.sqrt(mean_sq + 1e-8) 
 
+        x_t = diffusion_obj.q_sample(x0, t, noise)
+
         rng, dropout_rng = jax.random.split(rng)
         pred_noise = model.apply({'params': params}, x_t, t, mode='vision', deterministic=False, rngs={'dropout': dropout_rng})
         
-        # FIX: Polar Coordinate Loss
-        pred_noise_A = jnp.abs(pred_noise)
-        pred_noise_theta = jnp.angle(pred_noise)
-
-        target_noise_A = jnp.abs(noise)
-        target_noise_theta = jnp.angle(noise)
-
-        # Amplitude loss (Standard MSE)
-        loss_A = jnp.mean((pred_noise_A - target_noise_A)**2)
-
-        # Phase loss (1 - Cosine similarity handles the 2pi wrap-around perfectly)
-        loss_theta = jnp.mean(1 - jnp.cos(pred_noise_theta - target_noise_theta))
-
-        loss = loss_A + loss_theta
+        # FIX: Revert to robust Cartesian MSE. 
+        # Polar loss with jnp.angle() is unstable near zero amplitude.
+        loss = jnp.mean(jnp.abs(pred_noise - noise)**2)
         
         # Physics regularization
         field = SIFField(
@@ -195,7 +184,7 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         )
         # FIX: Force real type on Hamiltonian loss
         phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
-        loss = loss + 0.01 * jnp.mean(phys_loss)
+        loss = loss + 0.0001 * jnp.mean(phys_loss)
         return loss.real
         
     elif mode == 'text':
@@ -222,5 +211,5 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         )
         # FIX: Force real type on Hamiltonian loss
         phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
-        loss = loss + 0.01 * jnp.mean(phys_loss)
+        loss = loss + 0.0001 * jnp.mean(phys_loss)
         return loss.real
