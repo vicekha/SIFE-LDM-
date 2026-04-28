@@ -8,10 +8,13 @@ def scale_by_andi(tau: float = 1e-3, nu: float = 1e-4, epsilon: float = 1e-8) ->
 
     def update_fn(updates, state, params=None):
         def precondition(g):
-            # The scaling factor capped at 5.0
+            # SAFETY: Force gradient to be real to prevent Optax ComplexWarning
+            if jnp.iscomplexobj(g):
+                g = g.real
+                
             scale = jnp.minimum(tau / (nu + epsilon), 5.0)
             if g.ndim == 2:
-                # Structural equilibration: normalize by row/col norms for large matrices
+                # Structural equilibration
                 row_norm = jnp.linalg.norm(g, axis=1, keepdims=True) + epsilon
                 col_norm = jnp.linalg.norm(g, axis=0, keepdims=True) + epsilon
                 g = g / jnp.sqrt(row_norm * col_norm)

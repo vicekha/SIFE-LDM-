@@ -1,0 +1,11 @@
+{
+  "Loss computed via get_loss": 2.096003293991089,
+  "Images Encoded Var": 0.9994680881500244,
+  "x_t Var": 1.0831055641174316,
+  "Noise Var": 2.000307083129883,
+  "Max grad norm": 0.2192922681570053,
+  "Min grad norm": 2.967365589356952e-11,
+  "Mean grad norm": 0.016175156459212303,
+  "Param dtype": "float32",
+  "Grad dtype": "float32"
+}

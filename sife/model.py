@@ -163,8 +163,10 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         x0_img = model.apply({'params': params}, images, method=model.encode_image)
         x0 = model.apply({'params': params}, x0_img, method=model.encode_patch)
         
-        noise_A = jax.random.normal(rng, x0.shape)
-        noise_theta = jax.random.normal(rng, x0.shape)
+        # FIX: Split RNG for independent noise sampling
+        rng, k1, k2 = jax.random.split(rng, 3)
+        noise_A = jax.random.normal(k1, x0.shape)
+        noise_theta = jax.random.normal(k2, x0.shape)
         noise = noise_A + 1j * noise_theta
         
         x_t = diffusion_obj.q_sample(x0, t, noise)
@@ -172,16 +174,18 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         rng, dropout_rng = jax.random.split(rng)
         pred_noise = model.apply({'params': params}, x_t, t, mode='vision', deterministic=False, rngs={'dropout': dropout_rng})
         
-        loss = jnp.mean(jnp.abs(pred_noise - noise)**2)
+        # FIX: Force real type on MSE loss
+        loss = jnp.mean(jnp.real(pred_noise - noise) ** 2 + jnp.imag(pred_noise - noise) ** 2)
         
         # Physics regularization
         field = SIFField(
             amplitude=jnp.abs(x_t), phase=jnp.angle(x_t), fluctuation=jnp.angle(x_t),
             velocity_amp=jnp.zeros_like(x_t.real), velocity_phi=jnp.zeros_like(x_t.real)
         )
-        phys_loss = compute_hamiltonian(field, config.physics_config)
+        # FIX: Force real type on Hamiltonian loss
+        phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
         loss = loss + 0.01 * jnp.mean(phys_loss)
-        return loss
+        return loss.real
         
     elif mode == 'text':
         tokens = batch['tokens']
@@ -197,13 +201,15 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         
         # CrossEntropy on masked positions
         one_hot = jax.nn.one_hot(tokens, config.vocab_size)
-        ce_loss = optax.softmax_cross_entropy(logits, one_hot)
+        # FIX: Force real type on CE loss
+        ce_loss = jnp.real(optax.softmax_cross_entropy(logits, one_hot))
         loss = jnp.sum(ce_loss * mask) / (jnp.sum(mask) + 1e-8)
         
         field = SIFField(
             amplitude=jnp.abs(pred_x0), phase=jnp.angle(pred_x0), fluctuation=jnp.angle(pred_x0),
             velocity_amp=jnp.zeros_like(pred_x0.real), velocity_phi=jnp.zeros_like(pred_x0.real)
         )
-        phys_loss = compute_hamiltonian(field, config.physics_config)
+        # FIX: Force real type on Hamiltonian loss
+        phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
         loss = loss + 0.01 * jnp.mean(phys_loss)
-        return loss
+        return loss.real

@@ -55,7 +55,10 @@ class ComplexModReLU(nn.Module):
         phase = jnp.angle(inputs)
         bias = self.param('bias', nn.initializers.zeros_init(), (inputs.shape[-1],))
         new_amp = nn.relu(amp + bias)
-        return new_amp * jnp.exp(1j * phase)
+        
+        out = new_amp * jnp.exp(1j * phase)
+        # FIX: Ensure output is strictly complex64
+        return out.astype(jnp.complex64)
 
 class ComplexLayerNorm(nn.Module):
     epsilon: float = 1e-6
@@ -69,9 +72,13 @@ class ComplexLayerNorm(nn.Module):
         
         scale_real = self.param('scale_real', nn.initializers.ones_init(), (inputs.shape[-1],))
         scale_imag = self.param('scale_imag', nn.initializers.zeros_init(), (inputs.shape[-1],))
-        scale = scale_real + 1j * scale_imag
         
-        return normed * scale
+        # Ensure scale is strictly complex, not promoted oddly
+        scale = scale_real.astype(jnp.complex64) + 1j * scale_imag.astype(jnp.complex64)
+        
+        out = normed * scale
+        # FIX: Ensure output is strictly complex64, preventing real-cast warnings downstream
+        return out.astype(jnp.complex64)
 
 class ComplexDropout(nn.Module):
     rate: float

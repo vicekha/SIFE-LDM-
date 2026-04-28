@@ -1,0 +1,18 @@
+{
+  "model_type": "text",
+  "embed_dim": 64,
+  "num_heads": 2,
+  "num_blocks": 2,
+  "batch_size": 2,
+  "learning_rate": 0.0001,
+  "max_steps": 5,
+  "max_seq_len": 16,
+  "is_image": false,
+  "image_size": [
+    32,
+    32
+  ],
+  "patch_size": 4,
+  "image_channels": 3,
+  "num_classes": 0
+}

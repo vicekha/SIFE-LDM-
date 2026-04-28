@@ -1,0 +1,1 @@
+{"token_to_id": {"<pad>": 0, "<unk>": 1, "<bos>": 2, "<eos>": 3, "<mask>": 4, "<newline>": 5, "<indent>": 6, "<dedent>": 7}, "special_tokens": ["<pad>", "<unk>", "<bos>", "<eos>", "<mask>", "<newline>", "<indent>", "<dedent>"], "min_freq": 2, "max_size": 32000}

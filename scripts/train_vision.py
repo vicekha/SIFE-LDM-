@@ -21,7 +21,7 @@ except AttributeError:
     pass # NumPy >= 2.0 removed ComplexWarning from the main namespace
 from sife.model import (
     SIFELDMConfig, SIFELDM, create_train_state, train_step,
-    save_checkpoint, ImageEncoder, LabelEncoder
+    save_checkpoint
 )
 from sife.field import SIFEConfig
 from sife.multiscale import create_multiscale_config
@@ -72,24 +72,15 @@ def main():
     from sife.model import create_optimizer
     optimizer = create_optimizer(config)
     
-    # 2. Initialize ImageEncoder and LabelEncoder separately for projection
-    key, subkey = jax.random.split(key)
-    img_enc = ImageEncoder(features=config.embed_dim)
-    lbl_enc = LabelEncoder(num_classes=100, features=config.embed_dim)
-    
-    # Initialize encoder params with dummy inputs
-    dummy_img = jnp.zeros((1, 32, 32, 3), dtype=jnp.float32)
-    dummy_lbl = jnp.zeros((1,), dtype=jnp.int32)
-    img_enc_params = img_enc.init(subkey, dummy_img)
-    key, subkey = jax.random.split(key)
-    lbl_enc_params = lbl_enc.init(subkey, dummy_lbl)
-    
-    # 3. Load Data
+    # 2. Load Data
     print("Loading CIFAR-100 dataset...")
     images, labels = load_cifar_data()
     num_samples = len(images)
     
-    # 4. Training Loop with CFG class conditioning
+    # 3. Training Loop — end-to-end with CFG class conditioning
+    # Images and labels are passed raw; the model's get_loss encodes them
+    # through ImageEncoder/LabelEncoder whose weights ARE part of state.params
+    # and therefore receive gradient updates.
     print(f"Starting training for {config.max_steps} steps...")
     
     for step in range(config.max_steps):
@@ -98,25 +89,14 @@ def main():
         batch_images = jnp.array(images[idx], dtype=jnp.float32)
         batch_labels = jnp.array(labels[idx], dtype=jnp.int32)
         
-        # Project RGB images → complex latent field via ImageEncoder
-        # ImageEncoder: (B, H, W, 3) → (B, H, W, embed_dim) complex
-        complex_x = img_enc.apply(img_enc_params, batch_images)
-        
-        # Project labels → complex context embeddings via LabelEncoder
         # 15% CFG dropout: randomly null the context so model learns unconditional too
         key, subkey = jax.random.split(key)
         use_context = jax.random.uniform(subkey, (config.batch_size,)) > 0.15
-        label_context = lbl_enc.apply(lbl_enc_params, batch_labels)
-        # Shape: (B, 1, embed_dim) for transformer cross-attention
-        label_context = label_context[:, jnp.newaxis, :]
-        # Zero out context for dropout samples
-        cfg_mask = use_context[:, jnp.newaxis, jnp.newaxis].astype(jnp.complex64)
-        label_context = label_context * cfg_mask
         
         batch = {
-            'complex_embedding': complex_x,
-            'context': label_context,
-            'labels': batch_labels
+            'images': batch_images,
+            'labels': batch_labels,
+            'use_context_mask': use_context,
         }
         
         state, metrics = train_step(model, state, batch, diffusion, optimizer)
