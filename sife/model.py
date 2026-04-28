@@ -203,7 +203,9 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         one_hot = jax.nn.one_hot(tokens, config.vocab_size)
         # FIX: Force real type on CE loss
         ce_loss = jnp.real(optax.softmax_cross_entropy(logits, one_hot))
-        loss = jnp.sum(ce_loss * mask) / (jnp.sum(mask) + 1e-8)
+        # FIX: Stable text loss normalization to prevent division-by-zero gradients
+        denom = jnp.maximum(jnp.sum(mask), 1.0)
+        loss = jnp.sum(ce_loss * mask) / denom
         
         field = SIFField(
             amplitude=jnp.abs(pred_x0), phase=jnp.angle(pred_x0), fluctuation=jnp.angle(pred_x0),
