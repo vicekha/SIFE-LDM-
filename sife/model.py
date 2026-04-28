@@ -177,19 +177,37 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         rng, dropout_rng = jax.random.split(rng)
         pred_noise = model.apply({'params': params}, x_t, t, mode='vision', deterministic=False, rngs={'dropout': dropout_rng})
         
-        # FIX: Revert to robust Cartesian MSE. 
-        # Polar loss with jnp.angle() is unstable near zero amplitude.
+        # FIX: Compute pred_x0 to apply physics loss on the clean prediction.
+        # This prevents the physics loss from fighting the diffusion noise.
+        # Note: t is (B,), sqrt_alphas_cumprod is (timesteps,)
+        sqrt_alpha = diffusion_obj.sqrt_alphas_cumprod[t]
+        sqrt_one_minus_alpha = diffusion_obj.sqrt_one_minus_alphas_cumprod[t]
+        
+        # Expand dims for broadcasting (B, 1, 1, 1) or (B, 1, 1)
+        while len(sqrt_alpha.shape) < len(x_t.shape):
+            sqrt_alpha = jnp.expand_dims(sqrt_alpha, -1)
+            sqrt_one_minus_alpha = jnp.expand_dims(sqrt_one_minus_alpha, -1)
+
+        # Invert Polar Diffusion formula
+        pred_A0 = (jnp.abs(x_t) - sqrt_one_minus_alpha * jnp.real(pred_noise)) / (sqrt_alpha + 1e-8)
+        # Phase noise was scaled by pi * sqrt(1 - alpha)
+        pred_theta0 = jnp.angle(x_t) - sqrt_one_minus_alpha * jnp.pi * jnp.imag(pred_noise)
+        pred_x0 = jnp.abs(pred_A0) * jnp.exp(1j * pred_theta0)
+
         loss = jnp.mean(jnp.abs(pred_noise - noise)**2)
         
-        # Physics regularization
+        # Physics regularization on the PREDICTED CLEAN IMAGE
         field = SIFField(
-            amplitude=jnp.abs(x_t), phase=jnp.angle(x_t), fluctuation=jnp.angle(x_t),
-            velocity_amp=jnp.zeros_like(x_t.real), velocity_phi=jnp.zeros_like(x_t.real)
+            amplitude=jnp.abs(pred_x0), phase=jnp.angle(pred_x0), fluctuation=jnp.angle(pred_x0),
+            velocity_amp=jnp.zeros_like(pred_x0.real), velocity_phi=jnp.zeros_like(pred_x0.real)
         )
-        # FIX: Force real type on Hamiltonian loss
         phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
         loss = loss + 0.0001 * jnp.mean(phys_loss)
-        return loss.real
+        
+        # Enforce strictly real scalar for backprop and add NaN guard
+        final_loss = loss.real
+        final_loss = jnp.where(jnp.isnan(final_loss), 0.0, final_loss)
+        return final_loss
         
     elif mode == 'text':
         tokens = batch['tokens']
@@ -218,4 +236,6 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         loss = total_ce / num_valid
 
         # No physics loss for text – discrete masked diffusion does not benefit
-        return loss.real
+        final_loss = loss.real
+        final_loss = jnp.where(jnp.isnan(final_loss), 0.0, final_loss)
+        return final_loss

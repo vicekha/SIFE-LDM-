@@ -13,7 +13,8 @@ class ComplexLinear(nn.Module):
         in_features = inputs.shape[-1]
         k_real = self.param('kernel_real', nn.initializers.glorot_normal(), (in_features, self.features))
         k_imag = self.param('kernel_imag', nn.initializers.glorot_normal(), (in_features, self.features))
-        kernel = k_real + 1j * k_imag
+        # FIX: Scale by 1/sqrt(2) to correct complex variance (Var(real + i*imag) = Var(real) + Var(imag))
+        kernel = (k_real + 1j * k_imag) / jnp.sqrt(2.0)
         out = jnp.dot(inputs, kernel)
         if self.use_bias:
             b_real = self.param('bias_real', nn.initializers.zeros_init(), (self.features,))
@@ -39,7 +40,8 @@ class ComplexConv1D(nn.Module):
         real_out = conv_real(inputs.real) - conv_imag(inputs.imag)
         imag_out = conv_real(inputs.imag) + conv_imag(inputs.real)
         
-        out = real_out + 1j * imag_out
+        # FIX: Scale by 1/sqrt(2) to correct complex variance
+        out = (real_out + 1j * imag_out) / jnp.sqrt(2.0)
         
         if self.use_bias:
             b_real = self.param('bias_real', nn.initializers.zeros_init(), (self.features,))
