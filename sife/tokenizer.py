@@ -21,15 +21,21 @@ class Vocabulary:
             self.token_to_id[token] = idx
             self.id_to_token[idx] = token
             
+    def build_from_texts(self, texts: List[str]):
+        for text in texts:
+            # Word-level tokenization
+            for word in text.split():
+                self.add_token(word)
+            
     def encode(self, text: str) -> List[int]:
-        # Simple character-level tokenizer for SIFE fallback
-        tokens = list(text)
+        # Use space-based tokenization
+        tokens = text.split()
         return [self.token_to_id.get(t, self.unk_id) for t in tokens]
         
     def decode(self, ids: List[int]) -> str:
         # Ignore special tokens during simple decode
         specials = {self.pad_id, self.bos_id, self.eos_id, self.mask_id}
-        return "".join([self.id_to_token.get(i, "<UNK>") for i in ids if i not in specials])
+        return " ".join([self.id_to_token.get(i, "<UNK>") for i in ids if i not in specials])
         
     def save(self, filepath: str):
         with open(filepath, 'w') as f:
