@@ -177,37 +177,51 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         rng, dropout_rng = jax.random.split(rng)
         pred_noise = model.apply({'params': params}, x_t, t, mode='vision', deterministic=False, rngs={'dropout': dropout_rng})
         
-        # FIX: Compute pred_x0 to apply physics loss on the clean prediction.
-        # This prevents the physics loss from fighting the diffusion noise.
-        # Note: t is (B,), sqrt_alphas_cumprod is (timesteps,)
+        # ---------- Physics loss on predicted clean field ----------
         sqrt_alpha = diffusion_obj.sqrt_alphas_cumprod[t]
-        sqrt_one_minus_alpha = diffusion_obj.sqrt_one_minus_alphas_cumprod[t]
+        sqrt_1ma = diffusion_obj.sqrt_one_minus_alphas_cumprod[t]
         
-        # Expand dims for broadcasting (B, 1, 1, 1) or (B, 1, 1)
-        while len(sqrt_alpha.shape) < len(x_t.shape):
+        # Shape handling: expand dims to match x_t (complex, B, L, D)
+        while sqrt_alpha.ndim < x_t.ndim:
             sqrt_alpha = jnp.expand_dims(sqrt_alpha, -1)
-            sqrt_one_minus_alpha = jnp.expand_dims(sqrt_one_minus_alpha, -1)
+            sqrt_1ma = jnp.expand_dims(sqrt_1ma, -1)
 
-        # Invert Polar Diffusion formula
-        pred_A0 = (jnp.abs(x_t) - sqrt_one_minus_alpha * jnp.real(pred_noise)) / (sqrt_alpha + 1e-8)
-        # Phase noise was scaled by pi * sqrt(1 - alpha)
-        pred_theta0 = jnp.angle(x_t) - sqrt_one_minus_alpha * jnp.pi * jnp.imag(pred_noise)
-        pred_x0 = jnp.abs(pred_A0) * jnp.exp(1j * pred_theta0)
+        # Extract noise components (real = Amp noise, imag = phase noise)
+        noise_A_pred = jnp.real(pred_noise)
+        noise_th_pred = jnp.imag(pred_noise)
 
-        loss = jnp.mean(jnp.abs(pred_noise - noise)**2)
+        A_t = jnp.abs(x_t)
+        theta_t = jnp.angle(x_t)
+
+        # Predicted clean amplitude & phase (matching the forward process)
+        pred_A0 = (A_t - sqrt_1ma * noise_A_pred) / (sqrt_alpha + 1e-8)
+        pred_theta0 = theta_t - sqrt_1ma * jnp.pi * noise_th_pred
+        pred_A0 = jnp.maximum(pred_A0, 1e-6)               # prevent zero amplitude
+
+        pred_x0 = pred_A0 * jnp.exp(1j * pred_theta0)
+
+        # Cartesian noise loss
+        loss = jnp.mean(jnp.abs(pred_noise - noise) ** 2)
         
         # Physics regularization on the PREDICTED CLEAN IMAGE
         field = SIFField(
-            amplitude=jnp.abs(pred_x0), phase=jnp.angle(pred_x0), fluctuation=jnp.angle(pred_x0),
-            velocity_amp=jnp.zeros_like(pred_x0.real), velocity_phi=jnp.zeros_like(pred_x0.real)
+            amplitude=jnp.abs(pred_x0),
+            phase=jnp.angle(pred_x0 + 1e-8),             # small epsilon for gradient
+            fluctuation=jnp.angle(pred_x0 + 1e-8),
+            velocity_amp=jnp.zeros_like(pred_x0.real),
+            velocity_phi=jnp.zeros_like(pred_x0.real)
         )
         phys_loss = jnp.real(compute_hamiltonian(field, config.physics_config))
         loss = loss + 0.0001 * jnp.mean(phys_loss)
         
-        # Enforce strictly real scalar for backprop and add NaN guard
-        final_loss = loss.real
-        final_loss = jnp.where(jnp.isnan(final_loss), 0.0, final_loss)
-        return final_loss
+        # Sanity check – print on NaN for visibility
+        def nan_check(l):
+            if jnp.isnan(l):
+                print(f"!!! NaN LOSS DETECTED !!!")
+        
+        jax.debug.callback(nan_check, loss)
+        
+        return loss.real
         
     elif mode == 'text':
         tokens = batch['tokens']
@@ -236,6 +250,11 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         loss = total_ce / num_valid
 
         # No physics loss for text – discrete masked diffusion does not benefit
-        final_loss = loss.real
-        final_loss = jnp.where(jnp.isnan(final_loss), 0.0, final_loss)
-        return final_loss
+        # Sanity check – print on NaN for visibility
+        def nan_check(l):
+            if jnp.isnan(l):
+                print(f"!!! NaN LOSS DETECTED !!!")
+        
+        jax.debug.callback(nan_check, loss)
+        
+        return loss.real
