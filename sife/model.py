@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from typing import NamedTuple, Optional, Dict, Any, Tuple
+from typing import NamedTuple, Optional
 import optax
 
 from .unet import UnifiedSIFETransformer, ComplexPatchEncoder
@@ -56,10 +56,14 @@ class TextEncoder(nn.Module):
         phase_emb = nn.Embed(self.vocab_size, self.embed_dim)(input_ids)
         phase = jnp.tanh(phase_emb) * jnp.pi
         
-        amp = jnp.ones_like(phase)
+        # Safe amplitude: never zero
         if mask is not None:
-            amp = jnp.where(mask[..., None], 0.0, 1.0)
-            
+            # Padded tokens get tiny non-zero amplitude (1e-3) and fixed zero phase
+            amp = jnp.where(mask[..., None], 1e-3, 1.0)
+            phase = jnp.where(mask[..., None], 0.0, phase)
+        else:
+            amp = jnp.ones_like(phase)
+
         return amp * jnp.exp(1j * phase)
 
 class ImageDecoder(nn.Module):
@@ -189,36 +193,29 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         
     elif mode == 'text':
         tokens = batch['tokens']
-        mask = batch['mask'] # Assume binary mask provided
+        mask = batch['mask']           # True = PAD, False = real token
         B = tokens.shape[0]
-        t = jnp.zeros((B,), dtype=jnp.int32) # Timesteps unused for text but required by signature
-        
-        x0 = model.apply({'params': params}, tokens, mask=mask, method=model.encode_text)
-        
-        # ------------------------------------------------------------------
-        # CRITICAL: replace zero amplitude with epsilon so that the
-        # transformer never sees exactly zero, which causes softmax(NaN) gradients.
-        # ------------------------------------------------------------------
-        amp = jnp.abs(x0)
-        phase = jnp.angle(x0)
-        amp = jnp.maximum(amp, 1e-4)           # prevents all-zero tokens
-        x0 = amp * jnp.exp(1j * phase)
+        t = jnp.zeros((B,), dtype=jnp.int32)
+
+        # Encode – now safe, padded tokens have amplitude=1e-3 > 0
+        x0 = model.apply({'params': params}, tokens, mask=mask,
+                         method=model.encode_text)
 
         rng, dropout_rng = jax.random.split(rng)
-        pred_x0 = model.apply({'params': params}, x0, t, mode='text', deterministic=False, rngs={'dropout': dropout_rng})
-        logits = model.apply({'params': params}, pred_x0, method=model.decode_symbol)
-        
-        # --- NUMERICALLY STABLE LOSS ---
-        # valid positions are where mask == False
-        valid_mask = (~mask).astype(jnp.float32)   # shape (B, L)
-        # clip logits to avoid overflow in softmax
-        logits = jnp.clip(logits, -1e4, 1e4)
-        # cross-entropy with integer labels (no one-hot, no float-point surprises)
+        pred_x0 = model.apply({'params': params}, x0, t, mode='text',
+                              deterministic=False, rngs={'dropout': dropout_rng})
+
+        logits = model.apply({'params': params}, pred_x0,
+                             method=model.decode_symbol)
+
+        # Safe logit clipping
+        logits = jnp.clip(logits, -30.0, 30.0)
+
+        valid_mask = (~mask).astype(jnp.float32)
         ce_loss = optax.softmax_cross_entropy_with_integer_labels(logits, tokens)
         total_ce = jnp.sum(ce_loss * valid_mask)
         num_valid = jnp.maximum(jnp.sum(valid_mask), 1.0)
         loss = total_ce / num_valid
-        
-        # NOTE: Physics loss is removed for text as masked discrete diffusion 
-        # handles its own discrete topology without continuous Hamiltonian guidance.
+
+        # No physics loss for text – discrete masked diffusion does not benefit
         return loss.real
