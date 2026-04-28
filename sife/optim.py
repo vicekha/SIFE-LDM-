@@ -8,6 +8,9 @@ def scale_by_andi(tau: float = 1e-3, nu: float = 1e-4, epsilon: float = 1e-8) ->
 
     def update_fn(updates, state, params=None):
         def precondition(g):
+            # SAFETY: Zero out NaN gradients to prevent parameter corruption
+            g = jnp.where(jnp.isnan(g), 0.0, g)
+            
             # SAFETY: Force gradient to be real to prevent Optax ComplexWarning
             if jnp.iscomplexobj(g):
                 g = g.real
