@@ -195,6 +195,15 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         
         x0 = model.apply({'params': params}, tokens, mask=mask, method=model.encode_text)
         
+        # ------------------------------------------------------------------
+        # CRITICAL: replace zero amplitude with epsilon so that the
+        # transformer never sees exactly zero, which causes softmax(NaN) gradients.
+        # ------------------------------------------------------------------
+        amp = jnp.abs(x0)
+        phase = jnp.angle(x0)
+        amp = jnp.maximum(amp, 1e-4)           # prevents all-zero tokens
+        x0 = amp * jnp.exp(1j * phase)
+
         rng, dropout_rng = jax.random.split(rng)
         pred_x0 = model.apply({'params': params}, x0, t, mode='text', deterministic=False, rngs={'dropout': dropout_rng})
         logits = model.apply({'params': params}, pred_x0, method=model.decode_symbol)
