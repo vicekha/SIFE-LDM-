@@ -31,27 +31,33 @@ def generate_vision(model, params, config, rng, batch_size=1):
     images = model.apply({'params': params}, x_t, hw_shape=(H, W), method=model.decode_image)
     return images
 
-def generate_text(model, params, config, rng, start_tokens, max_new_tokens=50):
-    """Masked diffusion inference loop for text"""
+def generate_text(model, params, config, rng, start_tokens, max_new_tokens=20):
+    """Masked diffusion inference loop for text with Confidence Thresholds"""
+    from sife.diffusion import MaskedDiffusion
+    diffusion = MaskedDiffusion()
+    
     B = start_tokens.shape[0]
+    # Initialize with BOS and padding/masking
     tokens = jnp.pad(start_tokens, ((0,0), (0, max_new_tokens)), constant_values=0)
     mask = (tokens == 0)
     
-    for step in range(max_new_tokens):
+    # We unmask 1 token per step for stability in this simple loop
+    for _ in range(max_new_tokens):
         x_t = model.apply({'params': params}, tokens, mask=mask, method=model.encode_text)
         
         t_dummy = jnp.zeros((B,), dtype=jnp.int32)
         pred_x0 = model.apply({'params': params}, x_t, t_dummy, mode='text', deterministic=True)
         logits = model.apply({'params': params}, pred_x0, method=model.decode_symbol)
         
-        pred_tokens = jnp.argmax(logits, axis=-1)
+        # Use the robust unmasking logic
+        pred_ids, top_indices = diffusion.unmask_step(x_t, logits, mask, unmask_count=1)
         
-        first_masked = jnp.argmax(mask, axis=1)
-        
+        # Update the tokens and mask
         for b in range(B):
-            idx = first_masked[b]
+            idx = top_indices[b, 0]
+            # Only update if the token was actually masked
             if mask[b, idx]:
-                tokens = tokens.at[b, idx].set(pred_tokens[b, idx])
+                tokens = tokens.at[b, idx].set(pred_ids[b, idx])
                 mask = mask.at[b, idx].set(False)
                 
     return tokens

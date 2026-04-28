@@ -109,15 +109,33 @@ class MaskedDiffusion:
         masked_x = A_masked * jnp.exp(1j * theta0)
         return masked_x, mask
         
-    def unmask_step(self, current_x: jnp.ndarray, pred_phase: jnp.ndarray, unmask_ratio: float) -> jnp.ndarray:
+    def unmask_step(self, current_x: jnp.ndarray, logits: jnp.ndarray, mask: jnp.ndarray, unmask_count: int, unk_id: int = 1, pad_id: int = 0) -> Tuple[jnp.ndarray, jnp.ndarray]:
         """
-        For inference. Unmask the top confident tokens.
-        Confidence can be represented by the coherence or explicitly modeled.
-        Here we assume pred_phase gives the target phases, and we just pick a fraction to unmask.
+        Inference step: unmask the top N most confident tokens.
+        Bans UNK and PAD from being unmasked to prevent semantic collapse.
         """
-        # A simple iteration strategy: turn amplitude from 0 to 1 for the selected tokens.
-        # This will be detailed in inference logic, here we just provide the primitive.
-        pass
+        # Hard-ban UNK and PAD by penalizing their logits
+        banned_mask = jnp.zeros(logits.shape[-1])
+        banned_mask = banned_mask.at[unk_id].set(1e9)
+        banned_mask = banned_mask.at[pad_id].set(1e9)
+        
+        masked_logits = logits - banned_mask[None, None, :]
+        
+        # Confidence is the max logit (probability)
+        probs = jax.nn.softmax(masked_logits, axis=-1)
+        conf = jnp.max(probs, axis=-1)
+        
+        # Predicted IDs (now guaranteed not to be UNK/PAD unless everything is -inf)
+        pred_ids = jnp.argmax(masked_logits, axis=-1)
+        
+        # Set confidence of already unmasked tokens to very low
+        conf = jnp.where(~mask, -1e9, conf)
+        
+        # Find top unmask_count indices per batch
+        B, L = mask.shape
+        _, top_indices = jax.lax.top_k(conf, unmask_count)
+        
+        return pred_ids, top_indices
 
 class SIFEDiffusion:
     def __init__(self, diffusion: GaussianDiffusion, hamiltonian_fn: Callable, guidance_scale: float = 0.1):

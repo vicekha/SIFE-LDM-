@@ -24,12 +24,12 @@ class Vocabulary:
     def build_from_texts(self, texts: List[str]):
         for text in texts:
             # Word-level tokenization
-            for word in text.split():
+            for word in text.lower().split():
                 self.add_token(word)
             
     def encode(self, text: str) -> List[int]:
-        # Use space-based tokenization
-        tokens = text.split()
+        # FIX: Change from character-level to word-level to create smoother phase manifolds
+        tokens = text.lower().split() # Simple word split
         return [self.token_to_id.get(t, self.unk_id) for t in tokens]
         
     def decode(self, ids: List[int]) -> str:

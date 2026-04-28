@@ -42,12 +42,7 @@ class ImageEncoder(nn.Module):
         h = (h / 6.0) % 1.0
         
         phase = h * 2 * jnp.pi - jnp.pi
-        amp = v
-        
-        amp_mean = jnp.mean(amp, axis=(1,2), keepdims=True)
-        amp_std = jnp.std(amp, axis=(1,2), keepdims=True) + 1e-6
-        amp = (amp - amp_mean) / amp_std
-        amp = nn.softplus(amp)
+        amp = v # Keep amplitude in [0, 1] scale
         
         complex_img = amp[..., None] * jnp.exp(1j * phase[..., None])
         return jnp.tile(complex_img, (1, 1, 1, images.shape[-1]))
@@ -171,11 +166,27 @@ def get_loss(model, params, batch, rng, diffusion_obj, config, mode='vision'):
         
         x_t = diffusion_obj.q_sample(x0, t, noise)
         
+        # FIX: Normalize complex latent to unit variance for stable diffusion
+        mean_sq = jnp.mean(jnp.abs(x0)**2)
+        x0 = x0 / jnp.sqrt(mean_sq + 1e-8) 
+
         rng, dropout_rng = jax.random.split(rng)
         pred_noise = model.apply({'params': params}, x_t, t, mode='vision', deterministic=False, rngs={'dropout': dropout_rng})
         
-        # FIX: Force real type on MSE loss
-        loss = jnp.mean(jnp.real(pred_noise - noise) ** 2 + jnp.imag(pred_noise - noise) ** 2)
+        # FIX: Polar Coordinate Loss
+        pred_noise_A = jnp.abs(pred_noise)
+        pred_noise_theta = jnp.angle(pred_noise)
+
+        target_noise_A = jnp.abs(noise)
+        target_noise_theta = jnp.angle(noise)
+
+        # Amplitude loss (Standard MSE)
+        loss_A = jnp.mean((pred_noise_A - target_noise_A)**2)
+
+        # Phase loss (1 - Cosine similarity handles the 2pi wrap-around perfectly)
+        loss_theta = jnp.mean(1 - jnp.cos(pred_noise_theta - target_noise_theta))
+
+        loss = loss_A + loss_theta
         
         # Physics regularization
         field = SIFField(
