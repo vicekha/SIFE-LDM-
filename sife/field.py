@@ -90,7 +90,7 @@ def truth_potential(amplitude: Array, phase: Array) -> Array:
         phase_right = jnp.roll(phase, -1)
         weight = (2 * amp_sq * amp_sq_right) / (amp_sq + amp_sq_right + 1e-8)
         coherence = jnp.cos(phase - phase_right)
-        return jnp.sum(weight * coherence)
+        return jnp.mean(weight * coherence)
     elif ndim == 2:
         phi_T = 0.0
         for axis in [0, 1]:
@@ -98,14 +98,14 @@ def truth_potential(amplitude: Array, phase: Array) -> Array:
             phase_neighbor = jnp.roll(phase, -1, axis=axis)
             weight = (2 * amp_sq * amp_sq_neighbor) / (amp_sq + amp_sq_neighbor + 1e-8)
             coherence = jnp.cos(phase - phase_neighbor)
-            phi_T = phi_T + jnp.sum(weight * coherence)
+            phi_T = phi_T + jnp.mean(weight * coherence)
         return phi_T
     elif ndim == 3:
         amp_sq_right = jnp.roll(amp_sq, -1, axis=1)
         phase_right = jnp.roll(phase, -1, axis=1)
         weight = (2 * amp_sq * amp_sq_right) / (amp_sq + amp_sq_right + 1e-8)
         coherence = jnp.cos(phase - phase_right)
-        return jnp.sum(weight * coherence)
+        return jnp.mean(weight * coherence)
     raise ValueError(f"Unsupported ndim: {ndim}")
 
 def truth_potential_gradient(amplitude: Array, phase: Array) -> Tuple[Array, Array]:
@@ -181,18 +181,23 @@ def compute_hamiltonian(field: SIFField, config: SIFEConfig) -> Array:
     v_A = field.velocity_amp
     v_phi = field.velocity_phi
     
-    T = 0.5 * config.mass * jnp.sum(v_A**2 + A**2 * v_phi**2)
-    V_cent = -0.5 * config.mass * jnp.sum(A**2 * config.omega_0**2)
+    # Use mean instead of sum to ensure scale-invariance and prevent loss explosion
+    T = 0.5 * config.mass * jnp.mean(v_A**2 + A**2 * v_phi**2)
+    V_cent = -0.5 * config.mass * jnp.mean(A**2 * config.omega_0**2)
     
     psi = A * jnp.exp(1j * phi)
     if A.ndim == 1:
         grad_psi = discrete_gradient(psi)[0]
-        V_grad = 0.5 * config.stiffness * jnp.sum(jnp.abs(grad_psi)**2)
+        V_grad = 0.5 * config.stiffness * jnp.mean(jnp.abs(grad_psi)**2)
+    elif A.ndim == 3:
+        # For B, L, D tensors
+        grads = discrete_gradient(psi)
+        V_grad = 0.5 * config.stiffness * jnp.mean(jnp.stack([jnp.mean(jnp.abs(g)**2) for g in grads]))
     else:
         grads = discrete_gradient(psi)
-        V_grad = 0.5 * config.stiffness * sum(jnp.sum(jnp.abs(g)**2) for g in grads)
+        V_grad = 0.5 * config.stiffness * sum(jnp.mean(jnp.abs(g)**2) for g in grads)
         
-    V_dw = jnp.sum(config.alpha * A**4 - config.beta * A**2)
+    V_dw = jnp.mean(config.alpha * A**4 - config.beta * A**2)
     V_truth = config.gamma * truth_potential(A, phi)
     
     return T + V_grad + V_dw + V_truth + V_cent
